@@ -33,10 +33,19 @@
 
 4.  **Run the Backend Server**
     ```bash
-    python -m backend.main
+    uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
     ```
-    The API will be available at `http://localhost:8000`.
-    API Documentation (Swagger UI): `http://localhost:8000/docs`.
+    The API will be available at `http://127.0.0.1:8000`.
+    API Documentation (Swagger UI): `http://127.0.0.1:8000/docs`.
+
+5.  **Run the Frontend**
+    Open a new terminal:
+    ```bash
+    cd frontend
+    npm install
+    npm run dev
+    ```
+    Access the UI at logical localhost address (usually `http://localhost:5173`).
 
 ## Integration with n8n
 

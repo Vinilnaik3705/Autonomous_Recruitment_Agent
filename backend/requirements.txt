@@ -1,9 +1,0 @@
-streamlit>=1.25
-pandas
-numpy
-python-dotenv
-psycopg2-binary
-python-docx
-pdfplumber
-openai
-scikit-learn

@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv
+venv/
+ENV/
+
+# Node.js
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+node_modules/
+dist/
+
+# Privacy & Secrets
+secrets.toml
+.env
+.DS_Store
+
+# Local Data (assuming these are test files not needed for the repo structure)
+Resume Dataset/
+uploaded_media_*.png

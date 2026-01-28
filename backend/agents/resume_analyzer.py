@@ -1,6 +1,3 @@
-from langchain_core.prompts import PromptTemplate
-from langchain_openai import ChatOpenAI
-
 import os
 import toml
 
@@ -23,6 +20,7 @@ class ResumeAnalyzerAgent:
             # Fallback or error - for now returning None to avoid crash during import if not set
             return None
             
+        from langchain_openai import ChatOpenAI
         return ChatOpenAI(temperature=0, openai_api_key=api_key, model_name="gpt-4o-mini")
 
     def analyze_sentiment_and_summary(self, resume_text: str) -> dict:
@@ -44,6 +42,7 @@ class ResumeAnalyzerAgent:
         Output as a valid JSON object only. Do not include any markdown formatting or backticks.
         """
         
+        from langchain_core.prompts import PromptTemplate
         prompt = PromptTemplate(template=template, input_variables=["resume_text"])
         chain = prompt | self.llm
         
@@ -94,6 +93,7 @@ class ResumeAnalyzerAgent:
         Tone: Professional, Engaging.
         """
         
+        from langchain_core.prompts import PromptTemplate
         prompt = PromptTemplate(template=template, input_variables=["role", "experience", "skills"])
         chain = prompt | self.llm
         

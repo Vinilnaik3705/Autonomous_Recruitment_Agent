@@ -1,3 +1,9 @@
+import sys
+import os
+
+# Add project root to sys.path to allow running this script directly
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import Dict, Optional, List
@@ -197,10 +203,11 @@ def initiate_onboarding(req: OnboardingRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-def start_server():
-    """Start the FastAPI server."""
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
 if __name__ == "__main__":
-    start_server()
+    import uvicorn
+    # Set PYTHONPATH for reload subprocesses to find 'backend' module
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.environ["PYTHONPATH"] = project_root + os.pathsep + os.environ.get("PYTHONPATH", "")
+
+    # Run with reload enabled
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)

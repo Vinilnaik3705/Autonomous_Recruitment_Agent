@@ -52,6 +52,8 @@ const HRScreening = () => {
         }
     };
 
+    const resultsRef = React.useRef(null);
+
     const startScreening = async () => {
         if (resumes.length === 0) {
             alert("Please upload resumes first!");
@@ -61,46 +63,31 @@ const HRScreening = () => {
 
         setProcessing(true);
         setMatchResults(null);
-        const newUploadStatus = {};
+        let currentMatches = [];
 
         // 1. Bulk Upload Resumes
         const BATCH_SIZE = 50;
         const totalBatches = Math.ceil(resumes.length / BATCH_SIZE);
 
         try {
+            const newUploadStatus = {};
             for (let i = 0; i < totalBatches; i++) {
                 const start = i * BATCH_SIZE;
                 const end = Math.min(start + BATCH_SIZE, resumes.length);
                 const batch = resumes.slice(start, end);
 
-                // Set status to processing for this batch
-                batch.forEach(file => {
-                    newUploadStatus[file.name] = 'processing';
-                });
+                batch.forEach(file => { newUploadStatus[file.name] = 'processing'; });
                 setUploadStatus(prev => ({ ...prev, ...newUploadStatus }));
 
                 try {
                     await uploadResumesBatch(batch);
-                    batch.forEach(file => {
-                        newUploadStatus[file.name] = 'success';
-                    });
+                    batch.forEach(file => { newUploadStatus[file.name] = 'success'; });
                 } catch (err) {
                     console.error(`Batch ${i + 1} failed`, err);
-                    batch.forEach(file => {
-                        newUploadStatus[file.name] = 'error';
-                    });
+                    batch.forEach(file => { newUploadStatus[file.name] = 'error'; });
                 }
-
-                // Update specific statuses
                 setUploadStatus(prev => ({ ...prev, ...newUploadStatus }));
             }
-
-            // Wait a bit for background processing to start/catch up (naive approach)
-            // Realistically we should poll, but for 5000 files, we just inform user matching might be partial.
-            if (resumes.length > 50) {
-                alert("Large batch uploaded. Processing is happening in the background. Matching results might be updated progressively.");
-            }
-
         } catch (error) {
             console.error("Upload process failed", error);
         }
@@ -109,16 +96,40 @@ const HRScreening = () => {
         try {
             console.log("Matching resumes with topK:", topK);
             const results = await matchResumes(jdText, topK);
-            setMatchResults(results.matches);
+            console.log("Match Results Recieved:", results.matches);
 
-            // Trigger Webhook with matched results
-            triggerWebhook(jdText, results.matches, topK);
+            if (results.matches && results.matches.length > 0) {
+                setMatchResults(results.matches);
+                currentMatches = results.matches;
+
+                // Scroll to results
+                setTimeout(() => {
+                    if (resultsRef.current) {
+                        resultsRef.current.scrollIntoView({ behavior: 'smooth' });
+                    }
+                }, 100);
+            } else {
+                alert("No matches found. Try relaxing the search criteria or uploading more resumes.");
+            }
 
         } catch (error) {
             console.error("Analysis/Matching failed", error);
             alert("Matching failed. See console for details.");
         } finally {
             setProcessing(false);
+        }
+
+        // 3. Trigger Webhook (Fire and Forget - Don't block UI)
+        if (currentMatches.length > 0) {
+            const runId = new Date().toISOString().split('T')[1].replace('Z', ''); // e.g., 14:30:05.123
+            console.log(`[Run ${runId}] Triggering Webhook...`);
+
+            // Add Run ID to payload for debugging
+            const payloadMatches = currentMatches.map(m => ({ ...m, RunID: runId }));
+
+            triggerWebhook(jdText, payloadMatches, topK)
+                .then(() => console.log(`[Run ${runId}] Webhook triggered successfully`))
+                .catch(err => console.error(`[Run ${runId}] Webhook trigger failed:`, err));
         }
     };
 
@@ -343,7 +354,7 @@ const HRScreening = () => {
 
                 {/* RESULTS TABLE - Moved outside of columns for full width and no overlap */}
                 {matchResults && matchResults.length > 0 && (
-                    <div className="mt-16 bg-slate-800/50 border border-slate-700 rounded-xl overflow-hidden backdrop-blur-sm relative z-20 animate-in fade-in slide-in-from-bottom-8 shadow-xl">
+                    <div ref={resultsRef} className="mt-16 bg-slate-800/50 border border-slate-700 rounded-xl overflow-hidden backdrop-blur-sm relative z-20 animate-in fade-in slide-in-from-bottom-8 shadow-xl">
                         <div className="p-6 border-b border-slate-700">
                             <h2 className="text-xl font-semibold text-white flex items-center">
                                 <Sparkles className="w-5 h-5 mr-2 text-purple-400" />
@@ -373,7 +384,7 @@ const HRScreening = () => {
                                             <td className="p-4">
                                                 <div className="flex items-center">
                                                     <span className={`text-lg font-bold mr-2 ${candidate.MatchScore > 0.7 ? 'text-green-400' : candidate.MatchScore > 0.4 ? 'text-yellow-400' : 'text-red-400'}`}>
-                                                        {Math.round(candidate.MatchScore * 100)}%
+                                                        {(candidate.MatchScore * 100).toFixed(2)}%
                                                     </span>
                                                     <div className="w-16 h-1.5 bg-slate-700 rounded-full overflow-hidden">
                                                         <div

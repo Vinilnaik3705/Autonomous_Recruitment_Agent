@@ -45,7 +45,12 @@ export const triggerWebhook = async (jdText, matchResults, topK) => {
     const payload = {
         jd_text: jdText,
         top_k: topK,
-        matches: matchResults
+        matches: matchResults.map(m => ({
+            ...m,
+            // Ensure skills is a proper array or clean string to avoid N8N regex issues
+            // Sending as array makes it easier for N8N to handle without string replacement hacks
+            Skills: m.Skills ? m.Skills.split(',').map(s => s.trim()) : []
+        }))
     };
 
     const res = await fetch("http://localhost:5678/webhook-test/match-resumes", {

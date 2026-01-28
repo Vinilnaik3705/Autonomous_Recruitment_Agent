@@ -37,6 +37,7 @@ class MatchingService:
                         rf.filename 
                     FROM resume_data rd
                     LEFT JOIN resume_files rf ON rd.resume_file_id = rf.id
+                    ORDER BY rd.id ASC
                 """)
                 resumes = cur.fetchall()
                 

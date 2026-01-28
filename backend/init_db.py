@@ -57,6 +57,7 @@ def init_db():
                     candidate_email VARCHAR(100),
                     candidate_phone VARCHAR(50),
                     skills TEXT,
+                    education TEXT,
                     extracted_text TEXT,
                     interview_status VARCHAR(20),
                     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

@@ -111,8 +111,8 @@ const HRScreening = () => {
             const results = await matchResumes(jdText, topK);
             setMatchResults(results.matches);
 
-            // Trigger Webhook with raw files (FormData)
-            triggerWebhook(jdText, resumes, topK);
+            // Trigger Webhook with matched results
+            triggerWebhook(jdText, results.matches, topK);
 
         } catch (error) {
             console.error("Analysis/Matching failed", error);

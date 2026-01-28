@@ -60,7 +60,8 @@ class MatchingService:
                         "Education": res['education'] or "",
                         "MatchScore": score, # 0.0 to 1.0 for frontend multiplication
                         "File": res['filename'] or "Unknown File",
-                        "Skills": res['skills'] or ""
+                        "Skills": res['skills'] or "",
+                        "ResumeText": res.get('extracted_text', '') # Include text for n8n analysis
                     })
                 
                 # Sort by score descending

@@ -4,6 +4,7 @@ const API_BASE_URL = 'http://127.0.0.1:8000';
 
 const api = axios.create({
     baseURL: API_BASE_URL,
+    timeout: 300000, // 5 minutes
 });
 
 export const extractTextFromJD = async (file) => {
@@ -40,18 +41,19 @@ export const matchResumes = async (jdText, topK = 5) => {
     return response.data;
 };
 
-export const triggerWebhook = async (jdText, resumes, topK) => {
-    const formData = new FormData();
-    formData.append("jd_text", jdText);
-    formData.append("top_k", topK);
+export const triggerWebhook = async (jdText, matchResults, topK) => {
+    const payload = {
+        jd_text: jdText,
+        top_k: topK,
+        matches: matchResults
+    };
 
-    for (let i = 0; i < resumes.length; i++) {
-        formData.append("resumes", resumes[i]);
-    }
-
-    const res = await fetch("http://127.0.0.1:5678/webhook-test/hr-intake", {
+    const res = await fetch("http://localhost:5678/webhook-test/match-resumes", {
         method: "POST",
-        body: formData,
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload),
     });
 
     if (!res.ok) {

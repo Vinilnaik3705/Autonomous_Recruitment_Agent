@@ -83,6 +83,17 @@ async def resume_sentiment(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+class SentimentTextRequest(BaseModel):
+    resume_text: str
+
+@app.post("/resume/sentiment-text")
+def sentiment_text(req: SentimentTextRequest):
+    try:
+        analysis = resume_agent.analyze_sentiment_and_summary(req.resume_text)
+        return {"status": "success", "analysis": analysis}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/utils/extract-text")
 async def extract_text_from_file(file: UploadFile = File(...)):
     try:

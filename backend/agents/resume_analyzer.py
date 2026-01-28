@@ -36,12 +36,12 @@ class ResumeAnalyzerAgent:
         {resume_text}
         
         Please provide:
-        1. A brief professional summary (max 3 sentences).
-        2. Sentiment analysis of the candidate's tone (Confident, Passive, Academic, etc.).
-        3. A list of top 5 functional skills.
-        4. A "Hiring Potential" score from 1-10 based on clarity and depth.
+        1. "professional_summary": A brief professional summary (max 3 sentences).
+        2. "sentiment_analysis": Sentiment analysis of the candidate's tone (Confident, Passive, Academic, etc.).
+        3. "top_functional_skills": A list of top 5 functional skills.
+        4. "hiring_potential_score": A "Hiring Potential" score from 1-10 based on clarity and depth.
         
-        Output as JSON.
+        Output as a valid JSON object only. Do not include any markdown formatting or backticks.
         """
         
         prompt = PromptTemplate(template=template, input_variables=["resume_text"])
@@ -49,8 +49,26 @@ class ResumeAnalyzerAgent:
         
         try:
             response = chain.invoke({"resume_text": resume_text[:4000]}) # Truncate for token limits if needed
-            # Assuming content is the response text; might need output parser in production
-            return response.content
+            
+            content = response.content.strip()
+            # Clean up potential markdown code blocks
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.startswith("```"):
+                content = content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            
+            import json
+            try:
+                return json.loads(content.strip())
+            except json.JSONDecodeError:
+                # Fallback if parsing fails, but return structure so it doesn't break frontend
+                return {
+                    "error": "Failed to parse JSON",
+                    "raw_content": content
+                }
+                
         except Exception as e:
             return {"error": str(e)}
 

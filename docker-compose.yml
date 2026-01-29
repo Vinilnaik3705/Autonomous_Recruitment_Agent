@@ -1,0 +1,45 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: hr_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: hr_user
+      POSTGRES_PASSWORD: hr_pass
+      POSTGRES_DB: hr_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - hr_postgres_data:/var/lib/postgresql/data
+
+  fastapi:
+    build: ./backend
+    container_name: hr_fastapi
+    restart: always
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgresql+psycopg2://hr_user:hr_pass@postgres:5432/hr_db
+    ports:
+      - "8000:8000"
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: hr_n8n
+    restart: always
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - NODE_ENV=production
+      - GENERIC_TIMEZONE=Asia/Kolkata
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+volumes:
+  hr_postgres_data:
+  n8n_data:

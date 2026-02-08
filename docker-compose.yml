@@ -21,7 +21,7 @@ services:
     depends_on:
       - postgres
     environment:
-      DATABASE_URL: postgresql+psycopg2://hr_user:hr_pass@postgres:5432/hr_db
+      DATABASE_URL: postgresql://hr_user:hr_pass@postgres:5432/hr_db
     ports:
       - "8000:8000"
 

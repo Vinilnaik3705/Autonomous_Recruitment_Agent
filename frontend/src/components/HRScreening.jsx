@@ -63,73 +63,82 @@ const HRScreening = () => {
 
         setProcessing(true);
         setMatchResults(null);
-        let currentMatches = [];
 
-        // 1. Bulk Upload Resumes
-        const BATCH_SIZE = 50;
-        const totalBatches = Math.ceil(resumes.length / BATCH_SIZE);
-
+        // 1. Create Job Description in DB to get JobID
+        let jobId = "JOB-001"; // Fallback
         try {
-            const newUploadStatus = {};
-            for (let i = 0; i < totalBatches; i++) {
-                const start = i * BATCH_SIZE;
-                const end = Math.min(start + BATCH_SIZE, resumes.length);
-                const batch = resumes.slice(start, end);
+            console.log("Saving Job Description to DB...");
+            const jdData = {
+                title: jdAgentInput.role || "Job Opening",
+                description: jdText,
+                required_skills: jdAgentInput.skills || "Not specified",
+                min_experience: 0,
+                max_experience: 0
+            };
 
-                batch.forEach(file => { newUploadStatus[file.name] = 'processing'; });
-                setUploadStatus(prev => ({ ...prev, ...newUploadStatus }));
+            // Dynamically import createJobDescription to avoid circular dependency if not in initial import
+            const { createJobDescription } = await import('../api');
+            const jdResponse = await createJobDescription(jdData);
 
-                try {
-                    await uploadResumesBatch(batch);
-                    batch.forEach(file => { newUploadStatus[file.name] = 'success'; });
-                } catch (err) {
-                    console.error(`Batch ${i + 1} failed`, err);
-                    batch.forEach(file => { newUploadStatus[file.name] = 'error'; });
-                }
-                setUploadStatus(prev => ({ ...prev, ...newUploadStatus }));
+            if (jdResponse && jdResponse.job_id) {
+                jobId = jdResponse.job_id;
+                console.log("Created Job ID:", jobId);
             }
         } catch (error) {
-            console.error("Upload process failed", error);
+            console.error("Failed to save JD:", error);
+            if (!confirm("Failed to save Job Description to DB. Continue with default ID 'JOB-001'?")) {
+                setProcessing(false);
+                return;
+            }
         }
 
-        // 2. Match Resumes
+        // 2. Upload resumes to n8n workflow via proxy endpoint
+        const API_BASE = 'http://127.0.0.1:8000';
+        const newUploadStatus = {};
+        resumes.forEach(file => { newUploadStatus[file.name] = 'processing'; });
+        setUploadStatus(prev => ({ ...prev, ...newUploadStatus }));
+
+        let successCount = 0;
+        let errorCount = 0;
+        const results = [];
+
         try {
-            console.log("Matching resumes with topK:", topK);
-            const results = await matchResumes(jdText, topK);
-            console.log("Match Results Recieved:", results.matches);
+            // Use batch processing endpoint (more reliable for bulk uploads)
+            const formData = new FormData();
+            resumes.forEach(file => formData.append('files', file));
+            formData.append('jobId', jobId);
 
-            if (results.matches && results.matches.length > 0) {
-                setMatchResults(results.matches);
-                currentMatches = results.matches;
+            console.log(`📤 Sending ${resumes.length} resumes to batch processing...`);
 
-                // Scroll to results
-                setTimeout(() => {
-                    if (resultsRef.current) {
-                        resultsRef.current.scrollIntoView({ behavior: 'smooth' });
-                    }
-                }, 100);
-            } else {
-                alert("No matches found. Try relaxing the search criteria or uploading more resumes.");
+            const response = await fetch(`${API_BASE}/jobs/batch-screen`, {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error(`❌ Batch processing failed (HTTP ${response.status}):`, errorText);
+                setProcessing(false);
+                alert(`Error: ${errorText}`);
+                return;
             }
 
-        } catch (error) {
-            console.error("Analysis/Matching failed", error);
-            alert("Matching failed. See console for details.");
-        } finally {
+            const batchResults = await response.json();
+            console.log(`✅ Batch processing complete:`, batchResults);
+
             setProcessing(false);
-        }
 
-        // 3. Trigger Webhook (Fire and Forget - Don't block UI)
-        if (currentMatches.length > 0) {
-            const runId = new Date().toISOString().split('T')[1].replace('Z', ''); // e.g., 14:30:05.123
-            console.log(`[Run ${runId}] Triggering Webhook...`);
+            // Show summary
+            const successCount = Array.isArray(batchResults) ? batchResults.length : 0;
+            const shortlistedCount = Array.isArray(batchResults) ? batchResults.filter(r => r.shortlisted === true || r.score >= 45).length : 0;
+            const rejectedCount = Array.isArray(batchResults) ? batchResults.filter(r => r.shortlisted === false || r.score < 45).length : 0;
 
-            // Add Run ID to payload for debugging
-            const payloadMatches = currentMatches.map(m => ({ ...m, RunID: runId }));
+            alert(`✅ Processing Complete!\n\nTotal: ${resumes.length}\nProcessed: ${successCount}\nShortlisted: ${shortlistedCount}\nRejected: ${rejectedCount}\n\nCheck the console for detailed results.`);
 
-            triggerWebhook(jdText, payloadMatches, topK)
-                .then(() => console.log(`[Run ${runId}] Webhook triggered successfully`))
-                .catch(err => console.error(`[Run ${runId}] Webhook trigger failed:`, err));
+        } catch (error) {
+            console.error(`❌ Screening failed:`, error);
+            setProcessing(false);
+            alert(`Error: ${error.message}`);
         }
     };
 

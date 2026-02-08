@@ -5,8 +5,13 @@ import toml
 from typing import Generator, Optional
 
 def get_db_config():
-    """Load database config from secrets.toml or environment variables."""
+    """Load database config from environment variables (priority) or secrets.toml."""
+    # 1. DATABASE_URL (Docker / Production priority)
+    if os.getenv("DATABASE_URL"):
+        return {"dsn": os.getenv("DATABASE_URL")}
+
     config = {}
+    # 2. Load secrets.toml if available (Local Dev)
     if os.path.exists("secrets.toml"):
         try:
             secrets = toml.load("secrets.toml")
@@ -20,12 +25,13 @@ def get_db_config():
         except Exception as e:
             print(f"Warning: Could not load ../secrets.toml: {e}")
     
+    # 3. Return Dictionary (Env vars override config file if needed, or fallback)
     return {
-        'host': config.get('host', os.getenv('DB_HOST', 'localhost')),
-        'database': config.get('name', os.getenv('DB_NAME', 'resume_analyzer')),
-        'user': config.get('user', os.getenv('DB_USER', 'postgres')),
-        'password': config.get('password', os.getenv('DB_PASSWORD', 'password')),
-        'port': config.get('port', os.getenv('DB_PORT', '5432'))
+        'host': os.getenv('DB_HOST', config.get('host', 'localhost')),
+        'database': os.getenv('DB_NAME', config.get('name', 'resume_analyzer')),
+        'user': os.getenv('DB_USER', config.get('user', 'postgres')),
+        'password': os.getenv('DB_PASSWORD', config.get('password', 'password')),
+        'port': os.getenv('DB_PORT', config.get('port', '5432'))
     }
 
 def get_db_connection():

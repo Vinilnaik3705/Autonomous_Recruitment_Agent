@@ -14,9 +14,14 @@ from backend.services.feedback_service import FeedbackService
 from backend.services.onboarding_service import OnboardingService
 from backend.agents.resume_analyzer import ResumeAnalyzerAgent
 from backend.services.matching_service import MatchingService
+from backend.routers import email_router
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="HR Automation Agent API")
+
+app.include_router(email_router.router)
+from backend.routers import job_router
+app.include_router(job_router.router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,6 +30,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def startup_event():
+    print("--> STARTUP: Listing all registered routes:")
+    for route in app.routes:
+        if hasattr(route, "path"):
+            print(f"   Route: {route.path}")
+    print("------------------------------------------")
 
 # Services
 scheduler = SchedulingService()
@@ -99,6 +112,72 @@ def sentiment_text(req: SentimentTextRequest):
         return {"status": "success", "analysis": analysis}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+class ResumeScoreRequest(BaseModel):
+    resume_text: str
+    job_description: str
+
+@app.post("/resume/score-with-embeddings")
+def score_resume_with_embeddings(req: ResumeScoreRequest):
+    """
+    Score a single resume using embeddings-based semantic similarity.
+    Used by n8n workflow for individual resume processing.
+    """
+    try:
+        from backend.services.matching_service import MatchingService
+        import re
+        
+        # Extract basic info from resume text
+        email_match = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', req.resume_text)
+        email = email_match.group(0) if email_match else ""
+        
+        phone_match = re.search(r'[\+\(]?[1-9][0-9 .\-\(\)]{8,}[0-9]', req.resume_text)
+        phone = phone_match.group(0) if phone_match else ""
+        
+        # Extract name (first non-empty line)
+        lines = [l.strip() for l in req.resume_text.split('\n') if l.strip()]
+        name = lines[0] if lines else "Unknown"
+        
+        # Extract skills (simple keyword matching)
+        skill_keywords = ['python', 'java', 'javascript', 'react', 'node', 'sql', 'aws', 'docker', 'kubernetes', 'c++', 'c#', 'html', 'css', 'git', 'mongodb', 'postgresql']
+        skills = [skill for skill in skill_keywords if skill.lower() in req.resume_text.lower()]
+        
+        # Score using embeddings
+        matching_service = MatchingService()
+        resume_data = [{
+            'name': name,
+            'email': email,
+            'phone': phone,
+            'resume_text': req.resume_text,
+            'skills': skills
+        }]
+        
+        scored_results = matching_service.score_new_resumes_for_job(
+            job_description=req.job_description,
+            resume_data_list=resume_data,
+            threshold=45.0
+        )
+        
+        if scored_results:
+            result = scored_results[0]
+            return {
+                "candidate_name": result['candidate_name'],
+                "email": result['email'],
+                "phone": result['phone'],
+                "skills": result['skills'],
+                "score": result['score'],
+                "summary": f"Match score: {result['score']:.2f}/100 (Threshold: 45)",
+                "shortlisted": result['shortlisted']
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Scoring failed")
+            
+    except Exception as e:
+        print(f"Error in score_resume_with_embeddings: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/utils/extract-text")
 async def extract_text_from_file(file: UploadFile = File(...)):

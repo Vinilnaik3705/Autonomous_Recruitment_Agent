@@ -38,4 +38,8 @@ secrets.toml
 
 # Local Data (assuming these are test files not needed for the repo structure)
 Resume Dataset/
-uploaded_media_*.png
+# n8n Workflows
+*.json
+!package.json
+!tsconfig.json
+!jsconfig.json

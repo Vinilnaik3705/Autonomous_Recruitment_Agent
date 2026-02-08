@@ -1,27 +1,67 @@
 import os
 import toml
+import sys
 
 class ResumeAnalyzerAgent:
     def __init__(self):
+        print("Initializing ResumeAnalyzerAgent...")
         self.llm = self._get_llm()
+        if self.llm:
+            print("ResumeAnalyzerAgent: LLM successfully configured.")
+        else:
+            print("ResumeAnalyzerAgent: LLM FAILED to configure.")
     
     def _get_llm(self):
-        # Load API Key
+        # 1. Check Environment Variable
         api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            if os.path.exists("secrets.toml"):
-                secrets = toml.load("secrets.toml")
-                api_key = secrets.get("OPENAI_API_KEY") or secrets.get("openai_api_key")
-            elif os.path.exists("../secrets.toml"):
-                secrets = toml.load("../secrets.toml")
-                api_key = secrets.get("OPENAI_API_KEY") or secrets.get("openai_api_key")
+        if api_key:
+            print("ResumeAnalyzerAgent: Found OPENAI_API_KEY in environment variables.")
         
+        # 2. Check secrets.toml if not in env
         if not api_key:
-            # Fallback or error - for now returning None to avoid crash during import if not set
+            try:
+                # Strategy A: Relative to this file
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                project_root = os.path.dirname(os.path.dirname(current_dir))
+                secrets_path_a = os.path.join(project_root, "secrets.toml")
+                
+                # Strategy B: Current Working Directory
+                secrets_path_b = os.path.join(os.getcwd(), "secrets.toml")
+                
+                secrets_path = None
+                if os.path.exists(secrets_path_a):
+                    secrets_path = secrets_path_a
+                elif os.path.exists(secrets_path_b):
+                    secrets_path = secrets_path_b
+                
+                if secrets_path:
+                    print(f"ResumeAnalyzerAgent: Found secrets.toml at {secrets_path}")
+                    secrets = toml.load(secrets_path)
+                    api_key = secrets.get("OPENAI_API_KEY") or secrets.get("openai_api_key")
+                    if api_key:
+                        print("ResumeAnalyzerAgent: Loaded API Key from secrets.toml")
+                    else:
+                        print("ResumeAnalyzerAgent: secrets.toml found but NO 'OPENAI_API_KEY' inside.")
+                else:
+                     print(f"ResumeAnalyzerAgent: secrets.toml NOT found at {secrets_path_a} or {secrets_path_b}")
+
+            except Exception as e:
+                print(f"ResumeAnalyzerAgent: Error loading secrets.toml: {e}")
+
+        if not api_key:
+            print("ResumeAnalyzerAgent: CRITICAL ERROR - OPENAI_API_KEY not found.")
             return None
             
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(temperature=0, openai_api_key=api_key, model_name="gpt-4o-mini")
+        # Ensure it's in env for other libs
+        os.environ["OPENAI_API_KEY"] = api_key
+        
+        try:
+            from langchain_openai import ChatOpenAI
+            # Use gpt-4o-mini or gpt-3.5-turbo as fallback
+            return ChatOpenAI(temperature=0, openai_api_key=api_key, model_name="gpt-4o-mini")
+        except Exception as e:
+            print(f"ResumeAnalyzerAgent: Error initializing ChatOpenAI: {e}")
+            return None
 
     def analyze_sentiment_and_summary(self, resume_text: str) -> dict:
         if not self.llm:

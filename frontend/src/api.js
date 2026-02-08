@@ -79,4 +79,9 @@ export const generateJD = async (role, experience, skills) => {
     return response.data;
 };
 
+export const createJobDescription = async (jobData) => {
+    const response = await api.post('/jobs/create', jobData);
+    return response.data;
+};
+
 export default api;

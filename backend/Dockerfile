@@ -5,10 +5,16 @@ WORKDIR /app
 # Copy requirements from current directory
 COPY requirements.txt .
 
-# Install CPU-only PyTorch to avoid downloading NVIDIA/CUDA packages
-RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+# Install CPU-only PyTorch first to avoid NVIDIA/CUDA packages
+RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 
+# Install all other dependencies from requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Pre-download the sentence transformer model so it's baked into the image
+# This avoids downloading at runtime (which fails in restricted networks) and
+# ensures the model is always available even after container restarts.
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2'); print('Model pre-downloaded OK')"
 
 # Copy current directory (backend code) to /app/backend
 COPY . backend/

@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interview Feedback Form</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .container {
+            max-width: 700px;
+            width: 100%;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+
+        .candidate-info {
+            background: #f8fafc;
+            padding: 20px 30px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+
+        .candidate-info h3 {
+            color: #1e293b;
+            margin-bottom: 12px;
+            font-size: 16px;
+        }
+
+        .candidate-info p {
+            color: #475569;
+            font-size: 14px;
+            margin-bottom: 6px;
+        }
+
+        .candidate-info strong {
+            color: #1e293b;
+        }
+
+        .form-content {
+            padding: 30px;
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+        }
+
+        label {
+            display: block;
+            color: #1e293b;
+            font-weight: 600;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+
+        .required {
+            color: #dc2626;
+        }
+
+        input[type="number"],
+        textarea,
+        select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 14px;
+            font-family: inherit;
+            transition: border-color 0.3s;
+        }
+
+        input[type="number"]:focus,
+        textarea:focus,
+        select:focus {
+            outline: none;
+            border-color: #2563eb;
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 100px;
+        }
+
+        .rating-container {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .rating-option {
+            flex: 1;
+            min-width: 60px;
+        }
+
+        .rating-option input[type="radio"] {
+            display: none;
+        }
+
+        .rating-option label {
+            display: block;
+            padding: 12px;
+            text-align: center;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: normal;
+            margin: 0;
+        }
+
+        .rating-option input[type="radio"]:checked + label {
+            background: #2563eb;
+            color: white;
+            border-color: #2563eb;
+            font-weight: 600;
+        }
+
+        .rating-option label:hover {
+            border-color: #2563eb;
+            background: #eff6ff;
+        }
+
+        .help-text {
+            font-size: 12px;
+            color: #64748b;
+            margin-top: 5px;
+        }
+
+        .recommendation-options {
+            display: flex;
+            gap: 15px;
+            margin-top: 10px;
+        }
+
+        .recommendation-option {
+            flex: 1;
+        }
+
+        .recommendation-option input[type="radio"] {
+            display: none;
+        }
+
+        .recommendation-option label {
+            display: block;
+            padding: 15px;
+            text-align: center;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: 600;
+            margin: 0;
+        }
+
+        .recommendation-option input[type="radio"]:checked + label {
+            transform: scale(1.05);
+        }
+
+        .recommendation-option:nth-child(1) input[type="radio"]:checked + label {
+            background: #10b981;
+            color: white;
+            border-color: #10b981;
+        }
+
+        .recommendation-option:nth-child(2) input[type="radio"]:checked + label {
+            background: #f59e0b;
+            color: white;
+            border-color: #f59e0b;
+        }
+
+        .recommendation-option:nth-child(3) input[type="radio"]:checked + label {
+            background: #ef4444;
+            color: white;
+            border-color: #ef4444;
+        }
+
+        .submit-btn {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-top: 10px;
+        }
+
+        .submit-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(37, 99, 235, 0.3);
+        }
+
+        .submit-btn:disabled {
+            background: #cbd5e1;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .success-message,
+        .error-message {
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .success-message {
+            background: #d1fae5;
+            color: #065f46;
+            border: 1px solid #10b981;
+        }
+
+        .error-message {
+            background: #fee2e2;
+            color: #991b1b;
+            border: 1px solid #ef4444;
+        }
+
+        .success-message.show,
+        .error-message.show {
+            display: block;
+        }
+
+        @media (max-width: 600px) {
+            .recommendation-options {
+                flex-direction: column;
+            }
+
+            .rating-container {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📝 Interview Feedback Form</h1>
+            <p>Please provide your honest evaluation of the candidate</p>
+        </div>
+
+        <div class="candidate-info" id="candidateInfo">
+            <h3>Interview Details</h3>
+            <p><strong>Candidate:</strong> <span id="candidateName">Loading...</span></p>
+            <p><strong>Position:</strong> <span id="jobTitle">Loading...</span></p>
+            <p><strong>Interview ID:</strong> <span id="interviewId">Loading...</span></p>
+        </div>
+
+        <form id="feedbackForm" class="form-content">
+            <div class="success-message" id="successMessage">
+                ✅ Feedback submitted successfully! Thank you for your evaluation.
+            </div>
+            <div class="error-message" id="errorMessage">
+                ❌ <span id="errorText">An error occurred. Please try again.</span>
+            </div>
+
+            <!-- Technical Score -->
+            <div class="form-group">
+                <label>Technical Skills & Knowledge <span class="required">*</span></label>
+                <div class="rating-container">
+                    <div class="rating-option">
+                        <input type="radio" id="tech1" name="technical_score" value="1" required>
+                        <label for="tech1">1<br>Poor</label>
+                    </div>
+                    <div class="rating-option">
+                        <input type="radio" id="tech2" name="technical_score" value="2">
+                        <label for="tech2">2<br>Below Avg</label>
+                    </div>
+                    <div class="rating-option">
+                        <input type="radio" id="tech3" name="technical_score" value="3">
+                        <label for="tech3">3<br>Average</label>
+                    </div>
+                    <div class="rating-option">
+                        <input type="radio" id="tech4" name="technical_score" value="4">
+                        <label for="tech4">4<br>Good</label>
+                    </div>
+                    <div class="rating-option">
+                        <input type="radio" id="tech5" name="technical_score" value="5">
+                        <label for="tech5">5<br>Excellent</label>
+                    </div>
+                </div>
+                <p class="help-text">Evaluate the candidate's technical expertise and problem-solving ability</p>
+            </div>
+
+            <!-- Communication Score -->
+            <div class="form-group">
+                <label>Communication & Articulation <span class="required">*</span></label>
+                <div class="rating-container">
+                    <div class="rating-option">
+                        <input type="radio" id="comm1" name="communication_score" value="1" required>
+                        <label for="comm1">1<br>Poor</label>
+                    </div>
+                    <div class="rating-option">
+                        <input type="radio" id="comm2" name="communication_score" value="2">
+                        <label for="comm2">2<br>Below Avg</label>
+                    </div>
+                    <div class="rating-option">
+                        <input type="radio" id="comm3" name="communication_score" value="3">
+                        <label for="comm3">3<br>Average</label>
+                    </div>
+                    <div class="rating-option">
+                        <input type="radio" id="comm4" name="communication_score" value="4">
+                        <label for="comm4">4<br>Good</label>
+                    </div>
+                    <div class="rating-option">
+                        <input type="radio" id="comm5" name="communication_score" value="5">
+                        <label for="comm5">5<br>Excellent</label>
+                    </div>
+                </div>
+                <p class="help-text">Assess clarity of expression and ability to explain concepts</p>
+            </div>
+
+            <!-- Cultural Fit Score -->
+            <div class="form-group">
+                <label>Cultural Fit & Team Alignment <span class="required">*</span></label>
+                <div class="rating-container">
+                    <div class="rating-option">
+                        <input type="radio" id="culture1" name="cultural_fit_score" value="1" required>
+                        <label for="culture1">1<br>Poor</label>
+                    </div>
+                    <div class="rating-option">
+                        <input type="radio" id="culture2" name="cultural_fit_score" value="2">
+                        <label for="culture2">2<br>Below Avg</label>
+                    </div>
+                    <div class="rating-option">
+                        <input type="radio" id="culture3" name="cultural_fit_score" value="3">
+                        <label for="culture3">3<br>Average</label>
+                    </div>
+                    <div class="rating-option">
+                        <input type="radio" id="culture4" name="cultural_fit_score" value="4">
+                        <label for="culture4">4<br>Good</label>
+                    </div>
+                    <div class="rating-option">
+                        <input type="radio" id="culture5" name="cultural_fit_score" value="5">
+                        <label for="culture5">5<br>Excellent</label>
+                    </div>
+                </div>
+                <p class="help-text">How well would this candidate fit into the team and company culture?</p>
+            </div>
+
+            <!-- Overall Rating -->
+            <div class="form-group">
+                <label>Overall Rating <span class="required">*</span></label>
+                <div class="rating-container">
+                    <div class="rating-option">
+                        <input type="radio" id="overall1" name="overall_rating" value="1" required>
+                        <label for="overall1">1<br>Poor</label>
+                    </div>
+                    <div class="rating-option">
+                        <input type="radio" id="overall2" name="overall_rating" value="2">
+                        <label for="overall2">2<br>Below Avg</label>
+                    </div>
+                    <div class="rating-option">
+                        <input type="radio" id="overall3" name="overall_rating" value="3">
+                        <label for="overall3">3<br>Average</label>
+                    </div>
+                    <div class="rating-option">
+                        <input type="radio" id="overall4" name="overall_rating" value="4">
+                        <label for="overall4">4<br>Good</label>
+                    </div>
+                    <div class="rating-option">
+                        <input type="radio" id="overall5" name="overall_rating" value="5">
+                        <label for="overall5">5<br>Excellent</label>
+                    </div>
+                </div>
+                <p class="help-text">Your overall impression of the candidate</p>
+            </div>
+
+            <!-- Final Recommendation -->
+            <div class="form-group">
+                <label>Final Recommendation <span class="required">*</span></label>
+                <div class="recommendation-options">
+                    <div class="recommendation-option">
+                        <input type="radio" id="accept" name="recommendation" value="ACCEPT" required>
+                        <label for="accept">✅ ACCEPT<br><small>Proceed with offer</small></label>
+                    </div>
+                    <div class="recommendation-option">
+                        <input type="radio" id="onhold" name="recommendation" value="ON_HOLD">
+                        <label for="onhold">⏸️ ON HOLD<br><small>Needs review</small></label>
+                    </div>
+                    <div class="recommendation-option">
+                        <input type="radio" id="reject" name="recommendation" value="REJECT">
+                        <label for="reject">❌ REJECT<br><small>Not a fit</small></label>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Additional Comments -->
+            <div class="form-group">
+                <label for="comments">Additional Comments & Observations <span class="required">*</span></label>
+                <textarea 
+                    id="comments" 
+                    name="comments" 
+                    placeholder="Please provide specific examples and detailed feedback about the candidate's performance, strengths, areas of concern, etc."
+                    required
+                    minlength="20"></textarea>
+                <p class="help-text">Minimum 20 characters required</p>
+            </div>
+
+            <button type="submit" class="submit-btn" id="submitBtn">
+                Submit Feedback
+            </button>
+        </form>
+    </div>
+
+    <script>
+        // Parse URL parameters
+        const urlParams = new URLSearchParams(window.location.search);
+        const interviewId = urlParams.get('interview_id');
+        const candidateName = urlParams.get('candidate') || 'N/A';
+        const jobTitle = urlParams.get('job') || 'N/A';
+
+        // N8N Webhook URL - Update this to your actual n8n webhook URL
+        const WEBHOOK_URL = 'http://localhost:5678/webhook/interview-feedback';
+
+        // Populate candidate info
+        document.getElementById('candidateName').textContent = decodeURIComponent(candidateName);
+        document.getElementById('jobTitle').textContent = decodeURIComponent(jobTitle);
+        document.getElementById('interviewId').textContent = interviewId || 'N/A';
+
+        // Form validation and submission
+        const form = document.getElementById('feedbackForm');
+        const submitBtn = document.getElementById('submitBtn');
+        const successMessage = document.getElementById('successMessage');
+        const errorMessage = document.getElementById('errorMessage');
+        const errorText = document.getElementById('errorText');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            if (!interviewId) {
+                showError('Invalid interview ID. Please use the link from your email.');
+                return;
+            }
+
+            // Collect form data
+            const formData = new FormData(form);
+            const data = {
+                interview_id: parseInt(interviewId),
+                technical_score: parseInt(formData.get('technical_score')),
+                communication_score: parseInt(formData.get('communication_score')),
+                cultural_fit_score: parseInt(formData.get('cultural_fit_score')),
+                overall_rating: parseInt(formData.get('overall_rating')),
+                recommendation: formData.get('recommendation'),
+                comments: formData.get('comments').trim()
+            };
+
+            // Disable submit button
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Submitting...';
+
+            try {
+                const response = await fetch(WEBHOOK_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data)
+                });
+
+                if (response.ok) {
+                    showSuccess();
+                    form.reset();
+                    
+                    // Redirect after 3 seconds
+                    setTimeout(() => {
+                        window.location.href = 'about:blank';
+                    }, 3000);
+                } else {
+                    throw new Error('Failed to submit feedback');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                showError('Failed to submit feedback. Please try again or contact HR if the problem persists.');
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Submit Feedback';
+            }
+        });
+
+        function showSuccess() {
+            successMessage.classList.add('show');
+            errorMessage.classList.remove('show');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        function showError(message) {
+            errorText.textContent = message;
+            errorMessage.classList.add('show');
+            successMessage.classList.remove('show');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        // Validate interview ID on load
+        if (!interviewId) {
+            document.getElementById('candidateInfo').innerHTML = `
+                <h3 style="color: #dc2626;">⚠️ Invalid Link</h3>
+                <p>This feedback form requires a valid interview ID. Please use the link provided in your email.</p>
+            `;
+            form.style.display = 'none';
+        }
+    </script>
+</body>
+</html>

@@ -21,9 +21,10 @@ class OnboardingService:
     def initiate_onboarding(self, candidate_email: str, offer_details: Dict):
         conn = get_db_connection()
         try:
-            with conn.cursor() as cur:
-                # Mocking a candidates table lookup or similar
-                cur.execute("SELECT candidate_name FROM resume_data WHERE candidate_email = %s LIMIT 1", (candidate_email,))
+            from psycopg2.extras import RealDictCursor
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Search by email in unified schema
+                cur.execute("SELECT candidate_name FROM resume_data WHERE email = %s LIMIT 1", (candidate_email,))
                 res = cur.fetchone()
                 if not res:
                     return False

@@ -1,45 +1,72 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:16
     container_name: hr_postgres
-    restart: always
+    restart: unless-stopped
     environment:
       POSTGRES_USER: hr_user
       POSTGRES_PASSWORD: hr_pass
       POSTGRES_DB: hr_db
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - hr_postgres_data:/var/lib/postgresql/data
 
   fastapi:
     build: ./backend
     container_name: hr_fastapi
-    restart: always
+    restart: unless-stopped
     depends_on:
       - postgres
     environment:
       DATABASE_URL: postgresql://hr_user:hr_pass@postgres:5432/hr_db
+      N8N_WEBHOOK_URL: http://n8n:5678/webhook/resume-upload-atomic
+      BACKEND_WEBHOOK_URL: http://fastapi:8000/email/onboarding-welcome
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     ports:
       - "8000:8000"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ./backend:/app/backend
+      - ./secrets.toml:/app/secrets.toml:ro
+      - hf_model_cache:/root/.cache/huggingface
 
   n8n:
     image: n8nio/n8n:latest
     container_name: hr_n8n
-    restart: always
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - fastapi
     ports:
       - "5678:5678"
     environment:
-      - N8N_HOST=localhost
+      - N8N_HOST=127.0.0.1
       - N8N_PORT=5678
       - N8N_PROTOCOL=http
+      - N8N_WEBHOOK_URL=http://n8n:5678/webhook
       - NODE_ENV=production
       - GENERIC_TIMEZONE=Asia/Kolkata
+      - N8N_BINARY_DATA_MODE=filesystem
+      - EXECUTIONS_DATA_SAVE_ON_ERROR=all
+      - EXECUTIONS_DATA_SAVE_ON_SUCCESS=all
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n_db
+      - DB_POSTGRESDB_USER=hr_user
+      - DB_POSTGRESDB_PASSWORD=hr_pass
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - N8N_WEBHOOK_URL_BASE=http://n8n:5678/webhook
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     volumes:
       - n8n_data:/home/node/.n8n
 
 volumes:
   hr_postgres_data:
   n8n_data:
+  hf_model_cache:

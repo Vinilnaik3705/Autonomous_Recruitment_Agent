@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = 'http://127.0.0.1:8000';
+const API_BASE_URL = '/api';
 
 const api = axios.create({
     baseURL: API_BASE_URL,
@@ -53,7 +53,7 @@ export const triggerWebhook = async (jdText, matchResults, topK) => {
         }))
     };
 
-    const res = await fetch("http://localhost:5678/webhook-test/match-resumes", {
+    const res = await fetch("http://localhost:5678/webhook/start-screening", {
         method: "POST",
         headers: {
             "Content-Type": "application/json"
@@ -69,11 +69,6 @@ export const triggerWebhook = async (jdText, matchResults, topK) => {
     return await res.json();
 };
 
-export const resetDatabase = async () => {
-    const response = await api.delete('/utils/reset');
-    return response.data;
-};
-
 export const generateJD = async (role, experience, skills) => {
     const response = await api.post('/utils/generate-jd', { role, experience, skills });
     return response.data;
@@ -81,6 +76,26 @@ export const generateJD = async (role, experience, skills) => {
 
 export const createJobDescription = async (jobData) => {
     const response = await api.post('/jobs/create', jobData);
+    return response.data;
+};
+
+export const getInterviewStatus = async () => {
+    const response = await api.get('/jobs/interviewstatus');
+    return response.data;
+};
+
+export const clearAllInterviews = async () => {
+    const response = await api.delete('/jobs/clear-interviews');
+    return response.data;
+};
+
+export const getNotifications = async () => {
+    const response = await api.get('/notifications');
+    return response.data;
+};
+
+export const markNotificationRead = async (id) => {
+    const response = await api.patch(`/notifications/${id}/read`);
     return response.data;
 };
 

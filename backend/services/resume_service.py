@@ -377,38 +377,21 @@ def parse_resume(file_content: bytes, filename: str) -> Dict[str, Any]:
         "education": "; ".join(education)
     }
 
-def save_resume_to_db(data: Dict, user_id: int):
+def save_resume_to_db(data: Dict, user_id: int, job_id: str = None):
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            # Upsert into resume_files
+            # Insert directly into unified resume_data table
             cur.execute("""
-                INSERT INTO resume_files (user_id, filename, file_size, file_type, processed)
-                VALUES (%s, %s, %s, %s, TRUE)
-                ON CONFLICT DO NOTHING
+                INSERT INTO resume_data (job_id, candidate_name, email, phone, 
+                                         skills, education, interview_status)
+                VALUES (%s, %s, %s, %s, %s, %s, 'NEW')
                 RETURNING id
-            """, (user_id, data['filename'], len(data['raw_text']), 'pdf', ))
+            """, (job_id or 'DIRECT', data['name'], data['email'], data['mobile'], 
+                  data['skills'], data.get('education', '')))
             
             row = cur.fetchone()
-            if not row:
-                # Assuming it exists, fetch it
-                cur.execute("SELECT id FROM resume_files WHERE user_id=%s AND filename=%s", (user_id, data['filename']))
-                row = cur.fetchone()
-            
             file_id = row[0]
-            
-            # Upsert into resume_data
-            cur.execute("""
-                INSERT INTO resume_data (resume_file_id, user_id, candidate_name, candidate_email, 
-                                         candidate_phone, extracted_text, skills, education)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (resume_file_id) DO UPDATE 
-                SET candidate_name = EXCLUDED.candidate_name,
-                    candidate_email = EXCLUDED.candidate_email,
-                    extracted_text = EXCLUDED.extracted_text,
-                    skills = EXCLUDED.skills,
-                    education = EXCLUDED.education
-            """, (file_id, user_id, data['name'], data['email'], data['mobile'], data['raw_text'], data['skills'], data.get('education', '')))
         
         conn.commit()
         return file_id
@@ -418,46 +401,23 @@ def save_resume_to_db(data: Dict, user_id: int):
     finally:
         conn.close()
 
-def save_resumes_batch(data_list: List[Dict], user_id: int) -> List[int]:
+def save_resumes_batch(data_list: List[Dict], user_id: int, job_id: str = None) -> List[int]:
     conn = get_db_connection()
     file_ids = []
     try:
         with conn.cursor() as cur:
-            # 1. Bulk Insert into resume_files
-            files_values = [(user_id, d['filename'], len(d['raw_text']), 'pdf', True) for d in data_list]
-            
-            # We need IDs back. executemany doesn't support RETURNING easily with older psycopg2 versions 
-            # or without some complex logic.
-            # So we will loop but use a single transaction.
-            
             for d in data_list:
                  cur.execute("""
-                    INSERT INTO resume_files (user_id, filename, file_size, file_type, processed)
-                    VALUES (%s, %s, %s, %s, TRUE)
-                    ON CONFLICT DO NOTHING
+                    INSERT INTO resume_data (job_id, candidate_name, email, phone,
+                                             skills, education, interview_status)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'NEW')
                     RETURNING id
-                """, (user_id, d['filename'], len(d['raw_text']), 'pdf'))
+                """, (job_id or 'DIRECT', d['name'], d['email'], d['mobile'],
+                      d.get('skills', ''), d.get('education', '')))
                  
                  row = cur.fetchone()
-                 if not row:
-                     cur.execute("SELECT id FROM resume_files WHERE user_id=%s AND filename=%s", (user_id, d['filename']))
-                     row = cur.fetchone()
-                 
                  file_id = row[0]
                  file_ids.append(file_id)
-                 
-                 # Upsert into resume_data
-                 cur.execute("""
-                    INSERT INTO resume_data (resume_file_id, user_id, candidate_name, candidate_email, 
-                                             candidate_phone, extracted_text, skills, education)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (resume_file_id) DO UPDATE 
-                    SET candidate_name = EXCLUDED.candidate_name,
-                        candidate_email = EXCLUDED.candidate_email,
-                        extracted_text = EXCLUDED.extracted_text,
-                        skills = EXCLUDED.skills,
-                        education = EXCLUDED.education
-                """, (file_id, user_id, d['name'], d['email'], d['mobile'], d['raw_text'], d.get('skills', ''), d.get('education', '')))
 
         conn.commit()
         return file_ids

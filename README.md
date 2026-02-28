@@ -1,84 +1,140 @@
-# Autonomous Recruitment Agent
+# 🤖 Autonomous Recruitment Agent
 
-## ✅ Project Overview
-
-This is an autonomous recruitment agent that helps with:
-- Resume parsing and screening
-- Candidate matching
-- Automated interview scheduling
-- Onboarding workflows
-
-The system uses **FastAPI** for the backend, **PostgreSQL** for the database, and **n8n** for workflow orchestration.
+An AI-powered recruitment automation system that screens resumes, matches candidates, schedules interviews, and automates onboarding.
 
 ---
 
-## ✅ Prerequisites
+## ⚡ Quick Start (5 minutes setup)
 
-*   Docker Desktop (installed and running)
-*   Git
+### **STEP 1: Install Docker Desktop**
+- Download from: https://www.docker.com/products/docker-desktop
+- Install and **start Docker Desktop** (wait 30-60 seconds)
+- ✅ Verify: Open PowerShell and run `docker ps`
 
-**That's it! You do NOT need to install Python, PostgreSQL, or any other dependencies manually.**
-
----
-
-## ✅ Setup & Run (Standard Industry Way)
-
-### 1. Clone the Repository
-```bash
-git clone <repo_url>
-cd Autonomous_Recruitment_Agent
+### **STEP 2: Clone & Setup**
+```powershell
+git clone <your-repo-url>
+cd automated_res
 ```
 
-### 2. Configure Environment Variables
-Copy the example environment file and fill in your keys:
-
-```bash
-cp .env.example .env
+### **STEP 3: Configure API Keys**
+```powershell
+Copy-Item .env.example .env
 ```
 
-Open `.env` and set your `OPENAI_API_KEY`. The database URL and ports are pre-configured for Docker.
+Open `.env` in VS Code and add:
+- `OPENAI_API_KEY` = Your OpenAI key from https://platform.openai.com/api-keys
 
-### 3. Run with Docker
-Start the entire system with one command:
+Everything else is pre-configured!
 
-```bash
+### **STEP 4: Start Everything**
+```powershell
 docker compose up -d --build
 ```
 
-Docker will automatically:
-- Download the Python image
-- Install everything from `backend/requirements.txt`
-- Create the Postgres container & volume
-- Start FastAPI and n8n
+Wait 30-60 seconds for services to start...
 
-### 4. Open Services
+### **STEP 5: Setup n8n Workflows (Private Repo)**
+**Note:** n8n workflows contain proprietary business logic and are stored in a **private repository** for security.
 
-*   **FastAPI Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
-*   **n8n Workflows**: [http://localhost:5678](http://localhost:5678)
+1. Clone the private workflows repo (authorized team members only)
+2. Copy workflow JSON files to n8n container or import via n8n UI
+3. Workflows will use credentials from your `secrets.toml`
 
-### 5. Stop Services
-To stop the containers:
+### **STEP 6: Open in Browser**
+- **Dashboard**: http://localhost:3000 (Frontend)
+- **API Docs**: http://localhost:8000/docs (Backend)
+- **Workflows**: http://localhost:5678 (n8n)
 
-```bash
+---
+
+## 🛑 Troubleshooting
+
+**Docker not found?**
+```powershell
+# Restart computer or manually start Docker Desktop
+docker ps  # Should show "CONTAINER ID" header
+```
+
+**Port 8000 or 5678 already in use?**
+```powershell
+# Stop other services and try again
 docker compose down
+docker compose up -d --build
+```
+
+**Getting connection errors?**
+```powershell
+# Check logs
+docker compose logs -f postgres    # Check database
+docker compose logs -f fastapi     # Check backend
+docker compose logs -f n8n         # Check workflow engine
 ```
 
 ---
 
-## ✅ n8n Workflows
-Since n8n workflows are stored in a Docker volume, they are not automatically synced. 
+## 📁 Project Structure
 
-You can find the exported workflow JSON files in the `n8n_workflows/` folder (if available).
-To use them:
-1. Open n8n at `http://localhost:5678`.
-2. Go to **Workflows** > **Import**.
-3. Select the `.json` files from `n8n_workflows/`.
+```
+automated_res/ (Public Repository)
+├── backend/              # FastAPI server
+├── frontend/             # React web dashboard
+├── docker-compose.yml    # Container setup
+├── .env.example          # Template for configuration
+└── secrets.toml          # Your API keys (do NOT commit)
+
+automation-workflows/ (Private Repository - Authorized Team Only)
+├── *.json                # n8n workflow exports (confidential)
+└── setup-guide/          # Instructions for importing workflows
+```
 
 ---
 
-## ✅ File Structure
+## 🚀 What You Get
 
-*   `backend/requirements.txt`: Python dependencies (installed automatically by Docker).
-*   `backend/Dockerfile`: Instructions to build the backend image.
-*   `docker-compose.yml`: Defines how to run Postgres, FastAPI, and n8n together.
-*   `.env.example`: Template for environment variables.
+✅ Resume screening with AI  
+✅ Candidate ranking & matching  
+✅ Automated email invitations  
+✅ Interview scheduling system  
+✅ Onboarding workflows  
+✅ Role-based access control (RBAC)  
+
+---
+
+## 📚 Learn More
+
+- **Architecture & RBAC**: See `docs/important_docs/RBAC_ARCHITECTURE.md`
+- **Major Fixes**: See `docs/errors/` folder
+- **n8n Workflows**: Available in private `automation-workflows` repository (authorized team members only)
+
+---
+
+## 🔑 Environment Variables
+
+**Required:**
+- `OPENAI_API_KEY` - For resume analysis & candidate matching
+
+**Optional** (pre-configured):
+- Database: PostgreSQL (localhost:5433)
+- Backend: FastAPI (localhost:8000)
+- n8n: Workflow engine (localhost:5678)
+- Frontend: React app (localhost:3000)
+
+---
+
+## 🛑 Stop Everything
+
+```powershell
+docker compose down
+```
+
+To clean up everything (including database):
+```powershell
+docker compose down -v
+```
+
+---
+
+## ❓ Need Help?
+
+Check `docs/important_docs/` for detailed setup guides and common issues in `docs/errors/`

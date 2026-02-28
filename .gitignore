@@ -45,6 +45,7 @@ credentials.json
 # Local Data (test files)
 Resume Dataset/
 uploads/
+docs/
 
 # Debug outputs
 debug_output*.txt

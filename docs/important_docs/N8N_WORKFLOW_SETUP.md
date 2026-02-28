@@ -30,7 +30,7 @@ All containers are running successfully:
 4. Configure the credential:
    - **Name**: `Brevo API`
    - **Header Name**: `api-key`
-   - **Header Value**: `xkeysib-YOUR-ACTUAL-BREVO-API-KEY-HERE`
+   - **Header Value**: `BREVO_API_KEY_HERE`
 5. Save the credential
 
 Alternatively, you can configure it as a credential:

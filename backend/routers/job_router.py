@@ -110,13 +110,15 @@ async def proxy_n8n_resume_upload(
                             "job_id": jobId
                         }
 
-                    # Persist file to disk and log metadata for resume_files tracking
-                    upload_dir = os.environ.get("RESUME_UPLOAD_DIR", "uploads/resumes")
-                    os.makedirs(upload_dir, exist_ok=True)
+                    # Persist to disk only when explicitly enabled.
+                    # By default we keep uploads in-memory and forward directly to n8n.
+                    configured_upload_dir = os.environ.get("RESUME_UPLOAD_DIR", "").strip()
                     safe_name = f"{jobId}_{uuid.uuid4().hex}_{file.filename}"
-                    file_path = os.path.join(upload_dir, safe_name)
-                    with open(file_path, "wb") as f:
-                        f.write(file_content)
+                    if configured_upload_dir:
+                        os.makedirs(configured_upload_dir, exist_ok=True)
+                        file_path = os.path.join(configured_upload_dir, safe_name)
+                        with open(file_path, "wb") as f:
+                            f.write(file_content)
 
                     cur.execute(
                         """

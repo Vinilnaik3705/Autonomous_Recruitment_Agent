@@ -1,0 +1,14 @@
+site_name: HR Automation Platform Documentation
+site_description: End-to-end documentation for setup, architecture, workflows, status, and roadmap.
+theme:
+  name: readthedocs
+nav:
+  - Home: index.md
+  - Project Overview: about.md
+  - Getting Started: getting-started.md
+  - Architecture: architecture.md
+  - Backend API: backend-api.md
+  - Workflow Guide: workflows.md
+  - Project Status: status.md
+  - Challenges and Limitations: challenges-limitations.md
+  - Troubleshooting: troubleshooting.md

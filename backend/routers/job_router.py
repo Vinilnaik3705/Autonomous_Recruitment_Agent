@@ -88,54 +88,6 @@ async def proxy_n8n_resume_upload(
             # Read file content
             file_content = await file.read()
             print(f"File size: {len(file_content)} bytes")
-
-            file_hash = hashlib.sha256(file_content).hexdigest()
-
-            conn = None
-            try:
-                conn = get_db_connection()
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT 1 FROM resume_files WHERE session_id = %s AND file_hash = %s LIMIT 1",
-                        (jobId, file_hash)
-                    )
-                    exists = cur.fetchone()
-
-                    if exists:
-                        print("⚠️ Duplicate resume detected. Skipping upload and processing.")
-                        return {
-                            "success": True,
-                            "duplicate": True,
-                            "message": "Duplicate resume detected. Upload ignored.",
-                            "job_id": jobId
-                        }
-
-                    # Persist to disk only when explicitly enabled.
-                    # By default we keep uploads in-memory and forward directly to n8n.
-                    configured_upload_dir = os.environ.get("RESUME_UPLOAD_DIR", "").strip()
-                    safe_name = f"{jobId}_{uuid.uuid4().hex}_{file.filename}"
-                    if configured_upload_dir:
-                        os.makedirs(configured_upload_dir, exist_ok=True)
-                        file_path = os.path.join(configured_upload_dir, safe_name)
-                        with open(file_path, "wb") as f:
-                            f.write(file_content)
-
-                    cur.execute(
-                        """
-                        INSERT INTO resume_files (user_id, filename, file_size, file_type, file_hash, processed, session_id)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (session_id, file_hash) DO NOTHING
-                        """,
-                        (None, safe_name, len(file_content), file.content_type or "application/pdf", file_hash, True, jobId)
-                    )
-                conn.commit()
-            except Exception as db_err:
-                if conn:
-                    conn.rollback()
-                print(f"⚠️ Failed to log resume_files: {db_err}")
-            finally:
-                if conn:
-                    conn.close()
             
             # N8N expects files with field name 'data' for binary processing
             files = [
@@ -205,7 +157,6 @@ async def batch_screen_resumes(
     Threshold: 35/100 for shortlisting.
     """
     from backend.services.resume_service import extract_text_and_links_from_pdf_stream
-    from backend.database import close_db
     import json
     
     print(f"\n{'='*60}")
@@ -214,9 +165,8 @@ async def batch_screen_resumes(
     print(f"Job ID: {jobId}")
     print(f"Number of files: {len(files)}")
     
-    conn = None
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
         # Get job description
         from psycopg2.extras import RealDictCursor
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -433,14 +383,13 @@ async def batch_screen_resumes(
     except HTTPException:
         raise
     except Exception as e:
-        if conn:
-            conn.rollback()
+        conn.rollback()
         print(f"❌ Error in batch screening: {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Batch screening error: {str(e)}")
     finally:
-        close_db(conn)
+        conn.close()
 
 @router.get("/results/{job_id}")
 def get_screening_results(job_id: str):
@@ -449,10 +398,8 @@ def get_screening_results(job_id: str):
     Used by the frontend to poll for results after uploading resumes via n8n,
     without re-triggering the n8n screening webhook each time.
     """
-    from backend.database import close_db
-    conn = None
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
         from psycopg2.extras import RealDictCursor
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
@@ -486,32 +433,28 @@ def get_screening_results(job_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        close_db(conn)
+        conn.close()
 
 
 
 @router.get("/list")
 def list_jobs():
-    from backend.database import close_db
-    conn = None
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
         with conn.cursor() as cur:
-            cur.execute("SELECT job_id, title, description, required_skills, min_experience, max_experience, created_at FROM job_descriptions_readable ORDER BY created_at DESC;")
+            cur.execute("SELECT * FROM job_descriptions ORDER BY job_id DESC;")
             jobs = cur.fetchall()
             return jobs
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        close_db(conn)
+        conn.close()
 
 @router.get("/candidates")
 def list_candidates():
     """Get all candidates from the candidates table with their workflow status."""
-    from backend.database import close_db
-    conn = None
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
         from psycopg2.extras import RealDictCursor
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
@@ -533,15 +476,13 @@ def list_candidates():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        close_db(conn)
+        conn.close()
 
 @router.get("/database-status")
 def get_database_status():
     """Get comprehensive database status across all tables."""
-    from backend.database import close_db
-    conn = None
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
         from psycopg2.extras import RealDictCursor
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Count in each table
@@ -579,5 +520,5 @@ def get_database_status():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        close_db(conn)
+        conn.close()
 

@@ -4,36 +4,14 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional, List
-import traceback
-
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Request
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
-from starlette.middleware.base import BaseHTTPMiddleware
-
+from typing import Dict, Optional, List
 from backend.services.resume_service import parse_resume, save_resume_to_db, save_resumes_batch
 from backend.database import get_db_connection
 from backend.routers import email_router
 from fastapi.middleware.cors import CORSMiddleware
-
-# Simple in-memory response cache for high-frequency endpoints
-_response_cache: Dict[str, tuple] = {}  # {key: (response, timestamp)}
-_cache_ttl_seconds = 5  # Cache responses for 5 seconds
-
-def get_cached_response(cache_key: str):
-    """Get cached response if it exists and is not expired."""
-    if cache_key in _response_cache:
-        response, timestamp = _response_cache[cache_key]
-        if (datetime.now(timezone.utc) - timestamp).total_seconds() < _cache_ttl_seconds:
-            return response
-        else:
-            del _response_cache[cache_key]
-    return None
-
-def cache_response(cache_key: str, response: dict):
-    """Cache a response with current timestamp."""
-    _response_cache[cache_key] = (response, datetime.now(timezone.utc))
 
 app = FastAPI(title="HR Automation Agent API")
 
@@ -46,53 +24,26 @@ app.add_middleware(
 )
 
 app.include_router(email_router.router)
-from backend.routers import job_router, auth_router, candidate_router, payment_router
+from backend.routers import job_router, auth_router, candidate_router, notification_router, oa_router
 app.include_router(job_router.router)
 app.include_router(auth_router.router)
 app.include_router(candidate_router.router)
-app.include_router(payment_router.router)
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    error_msg = f"!!! GLOBAL ERROR: {exc}\n{traceback.format_exc()}"
-    print(error_msg)
-    # Log to a file as well for easier retrieval
-    try:
-        with open("backend_errors.log", "a") as f:
-            f.write(f"\n[{datetime.now()}] {error_msg}\n")
-    except Exception: pass
-    
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal Server Error", "error": str(exc)},
-    )
-
-class COOPMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
-        return response
-
-app.add_middleware(COOPMiddleware)
+app.include_router(notification_router.router)
+app.include_router(oa_router.router)
+app.include_router(oa_router.webhook_router)
 
 @app.on_event("startup")
 async def startup_event():
+    # Keep local uvicorn runs aligned with docker startup behavior.
+    from backend.init_db import init_db
+    init_db()
+
     print("--> STARTUP: Listing all registered routes:")
     for route in app.routes:
         if hasattr(route, "path"):
             print(f"   Route: {route.path}")
     print("------------------------------------------")
     
-    # One-time database initialization
-    try:
-        from backend.routers.auth_router import ensure_users_table
-        conn = get_db_connection()
-        ensure_users_table(conn)
-        conn.close()
-        print("--> DATABASE: Users table verified and initialized.")
-    except Exception as e:
-        print(f"--> DATABASE ERROR: Failed to initialize users table: {e}")
-
     global scheduler, feedback_service, onboarding_service, resume_agent, matcher_service
     
     # Import services here to avoid "app not loaded" or multiprocessing issues
@@ -117,59 +68,6 @@ feedback_service = None
 onboarding_service = None
 resume_agent = None
 matcher_service = None
-# Health Check
-@app.get("/health")
-def health_check():
-    return {"status": "ok", "message": "Backend is running"}
-
-# --- Notifications ---
-class Notification(BaseModel):
-    type: str = "info"
-    title: str
-    message: str
-
-@app.get("/notifications")
-def get_notifications():
-    from backend.database import get_db_connection, close_db
-    conn = None
-    try:
-        conn = get_db_connection()
-        from psycopg2.extras import RealDictCursor
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM notifications ORDER BY created_at DESC LIMIT 50")
-            return cur.fetchall()
-    finally:
-        if conn: close_db(conn)
-
-@app.post("/notifications")
-def create_notification(notif: Notification):
-    from backend.database import get_db_connection, close_db
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO notifications (type, title, message) VALUES (%s, %s, %s) RETURNING id",
-                (notif.type, notif.title, notif.message)
-            )
-            notif_id = cur.fetchone()[0]
-        conn.commit()
-        return {"status": "success", "id": notif_id}
-    finally:
-        if conn: close_db(conn)
-
-@app.patch("/notifications/{notif_id}/read")
-def mark_notification_read(notif_id: int):
-    from backend.database import get_db_connection, close_db
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute("UPDATE notifications SET read = TRUE WHERE id = %s", (notif_id,))
-        conn.commit()
-        return {"status": "success"}
-    finally:
-        if conn: close_db(conn)
 
 def process_batch_files(files_data: List[Dict], user_id: int):
     """Background task to process files and save to DB."""
@@ -469,7 +367,6 @@ def send_feedback_kits(window_minutes: int = 15):
                 candidate_email=iv["candidate_email"],
                 scheduled_time=str(iv["scheduled_time"]),
             )
-            scheduler.mark_kit_as_sent(iv["interview_id"])
             sent.append(iv["interview_id"])
         return {"kits_sent": len(sent), "interview_ids": sent}
     except Exception as e:
@@ -482,12 +379,10 @@ def apply_decision(interview_id: int):
     Aggregate all feedback for an interview and trigger next action:
     pass → send next-round email, fail → send rejection, hold → flag for HR review.
     """
-    conn = None
     try:
         decision = scheduler.aggregate_feedback_and_decide(interview_id)
 
         # Fetch candidate info
-        from backend.database import close_db
         conn = get_db_connection()
         from psycopg2.extras import RealDictCursor
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -496,6 +391,7 @@ def apply_decision(interview_id: int):
                 (interview_id,),
             )
             row = cur.fetchone()
+        conn.close()
 
         if not row:
             raise HTTPException(status_code=404, detail="Interview not found")
@@ -516,8 +412,6 @@ def apply_decision(interview_id: int):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        close_db(conn)
 
 
 # --- Phase 4: Feedback ---
@@ -529,6 +423,19 @@ class FeedbackRequest(BaseModel):
     recommendation: str
     detailed_feedback: str
 
+
+class FeedbackCollectRequest(BaseModel):
+    interview_id: Optional[int] = None
+    candidate_email: Optional[str] = None
+    candidate_name: Optional[str] = None
+    round_label: Optional[str] = None
+    technical_score: int
+    communication_score: int
+    cultural_fit_score: Optional[int] = None
+    overall_rating: int
+    recommendation: str
+    comments: str
+
 @app.post("/interview/feedback")
 def submit_feedback(req: FeedbackRequest):
     try:
@@ -537,18 +444,86 @@ def submit_feedback(req: FeedbackRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/interview/feedback/collect")
+def collect_feedback(req: FeedbackCollectRequest):
+    """
+    Accept feedback form submissions and map them to the canonical feedback schema.
+    Supports lookup by interview_id or candidate_email.
+    """
+    conn = None
+    try:
+        interview_id = req.interview_id
+
+        if interview_id is None:
+            if not req.candidate_email:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Provide interview_id or candidate_email",
+                )
+
+            conn = get_db_connection()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM interview_schedules
+                    WHERE LOWER(candidate_email) = LOWER(%s)
+                      AND feedback_submitted = FALSE
+                    ORDER BY scheduled_time DESC
+                    LIMIT 1
+                    """,
+                    (req.candidate_email,),
+                )
+                row = cur.fetchone()
+
+            if not row:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No pending interview found for this candidate",
+                )
+            interview_id = row[0]
+
+        recommendation_map = {
+            "accept": "strong_yes",
+            "on_hold": "hold",
+            "reject": "strong_no",
+        }
+        normalized_recommendation = recommendation_map.get(
+            str(req.recommendation or "").strip().lower(),
+            str(req.recommendation or "").strip().lower() or "hold",
+        )
+
+        details = (req.comments or "").strip()
+        if req.cultural_fit_score is not None:
+            details = f"Cultural Fit Score: {req.cultural_fit_score}/5\n\n{details}".strip()
+
+        payload = {
+            "technical_skills": req.technical_score,
+            "communication_skills": req.communication_score,
+            "overall_rating": req.overall_rating,
+            "recommendation": normalized_recommendation,
+            "detailed_feedback": details,
+        }
+        feedback_service.submit_feedback(interview_id, payload)
+        return {
+            "status": "submitted",
+            "interview_id": interview_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
 # --- Interview Status ---
 @app.get("/jobs/interviewstatus")
 def get_interview_status_main():
     """Get comprehensive interview status for all candidates."""
     import traceback
-    from backend.database import get_db_connection, close_db
-    
-    # Try to return cached response first to prevent DB spam
-    cached = get_cached_response("interview_status")
-    if cached is not None:
-        return cached
-    
+    from backend.database import get_db_connection
     conn = None
     try:
         print("--> DEBUG: Attempting to get DB connection for interview status...")
@@ -610,54 +585,34 @@ def get_interview_status_main():
             "completed":        completed,
             "cancelled":        cancelled,
             "with_feedback":    sum(1 for i in interviews if i.get('feedback_submitted')),
-            "pending_feedback": sum(1 for i in interviews if i.get('interview_status') in ('completed', 'in_progress') and not i.get('feedback_submitted')),
-            "status": "connected"
+            "pending_feedback": sum(1 for i in interviews if i.get('interview_status') in ('completed', 'in_progress') and not i.get('feedback_submitted'))
         }
         print(f"--> DEBUG: Returning interview status result summary: total={result['total_interviews']}")
-        cache_response("interview_status", result)
         return result
     except Exception as e:
         print(f"CRITICAL ERROR in get_interview_status_main: {str(e)}")
-        # Return cached response if available, even if expired
-        if "interview_status" in _response_cache:
-            response, _ = _response_cache["interview_status"]
-            response["status"] = "cached"  # Indicate this is cached data
-            return response
-        # Return mock data when database is offline (for development/testing)
-        mock_response = {
-            "total_interviews": 0,
-            "scheduled": [],
-            "in_progress": [],
-            "completed": [],
-            "cancelled": [],
-            "with_feedback": 0,
-            "pending_feedback": 0,
-            "status": "offline",
-            "message": "Database is offline. Start PostgreSQL with: docker-compose up -d",
-            "note": "Showing mock data for development purposes"
-        }
-        return mock_response
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
-        close_db(conn)
+        conn.close()
 
 
 @app.delete("/jobs/clear-interviews")
 def clear_all_interviews():
     """Remove all interview schedule records (for cleanup / demo reset)."""
-    from backend.database import get_db_connection, close_db
-    conn = None
+    from backend.database import get_db_connection
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute("TRUNCATE TABLE interview_schedules RESTART IDENTITY CASCADE;")
         conn.commit()
         return {"cleared": True, "message": "All interview records removed."}
     except Exception as e:
-        if conn:
-            conn.rollback()
+        conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        close_db(conn)
+        conn.close()
 
 # --- Phase 5: Onboarding ---
 class OnboardingRequest(BaseModel):
@@ -682,18 +637,25 @@ def initiate_onboarding(req: OnboardingRequest):
 async def serve_feedback_form():
     """Serve the interview feedback form HTML page."""
     try:
-        import os
-        # Construct path to frontend/feedback-form.html
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        form_path = os.path.join(project_root, "frontend", "feedback-form.html")
-        
-        if not os.path.exists(form_path):
+        backend_root = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(backend_root)
+
+        # Prefer project frontend file for local runs; fallback to backend copy for Docker image.
+        candidate_paths = [
+            os.path.join(project_root, "frontend", "feedback-form.html"),
+            os.path.join(backend_root, "feedback-form.html"),
+        ]
+
+        form_path = next((p for p in candidate_paths if os.path.exists(p)), None)
+        if not form_path:
             raise HTTPException(status_code=404, detail="Feedback form not found")
-        
+
         with open(form_path, "r", encoding="utf-8") as f:
             html_content = f.read()
-        
+
         return HTMLResponse(content=html_content)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

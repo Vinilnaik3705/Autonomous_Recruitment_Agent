@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Challenges and Limitations - HR Automation Platform Documentation</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Challenges and Limitations";
+        var mkdocs_page_input_path = "challenges-limitations.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> HR Automation Platform Documentation
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../about/">Project Overview</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../getting-started/">Getting Started</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../architecture/">Architecture</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../backend-api/">Backend API</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../workflows/">Workflow Guide</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../status/">Project Status</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Challenges and Limitations</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#challenges-faced-during-implementation">Challenges faced during implementation</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#1-oa-callback-reliability">1) OA callback reliability</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#2-schema-drift-across-environments">2) Schema drift across environments</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#3-integration-complexity-with-n8n">3) Integration complexity with n8n</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#4-long-running-ai-dependencies">4) Long-running AI dependencies</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#5-balancing-async-side-effects-with-fast-api-response">5) Balancing async side effects with fast API response</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#current-limitations">Current limitations</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#security-limitations">Security limitations</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#reliability-limitations">Reliability limitations</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#product-limitations">Product limitations</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#engineering-limitations">Engineering limitations</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#recommended-next-milestones">Recommended next milestones</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../troubleshooting/">Troubleshooting</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">HR Automation Platform Documentation</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Challenges and Limitations</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="challenges-and-limitations">Challenges and Limitations</h1>
+<h2 id="challenges-faced-during-implementation">Challenges faced during implementation</h2>
+<h3 id="1-oa-callback-reliability">1) OA callback reliability</h3>
+<p>Challenge:</p>
+<ul>
+<li>External OA providers do not always push completion data in a consistent, automatic way.</li>
+</ul>
+<p>What was done:</p>
+<ul>
+<li>Added direct OA result submission endpoints.</li>
+<li>Added callback endpoint that can parse multiple payload formats.</li>
+<li>Added score extraction from URL/page patterns.</li>
+</ul>
+<h3 id="2-schema-drift-across-environments">2) Schema drift across environments</h3>
+<p>Challenge:</p>
+<ul>
+<li>Existing databases had different schema versions and missing columns.</li>
+</ul>
+<p>What was done:</p>
+<ul>
+<li>Startup migrations table added.</li>
+<li>Non-destructive ALTER and backfill hotfix logic added.</li>
+<li>Compatibility handling for legacy columns (example: notification read fields).</li>
+</ul>
+<h3 id="3-integration-complexity-with-n8n">3) Integration complexity with n8n</h3>
+<p>Challenge:</p>
+<ul>
+<li>Multiple moving pieces: webhook URLs, payload shape, and environment connectivity.</li>
+</ul>
+<p>What was done:</p>
+<ul>
+<li>Added proxy and integration-safe payload mapping.</li>
+<li>Added fallback behavior and explicit logging around webhook calls.</li>
+</ul>
+<h3 id="4-long-running-ai-dependencies">4) Long-running AI dependencies</h3>
+<p>Challenge:</p>
+<ul>
+<li>Embedding model downloads can fail in restricted networks.</li>
+</ul>
+<p>What was done:</p>
+<ul>
+<li>Docker build pre-downloads sentence-transformer model.</li>
+</ul>
+<h3 id="5-balancing-async-side-effects-with-fast-api-response">5) Balancing async side effects with fast API response</h3>
+<p>Challenge:</p>
+<ul>
+<li>Email and scheduling side effects can slow response or fail independently.</li>
+</ul>
+<p>What was done:</p>
+<ul>
+<li>Moved side effects to background tasks where possible.</li>
+</ul>
+<h2 id="current-limitations">Current limitations</h2>
+<h3 id="security-limitations">Security limitations</h3>
+<ul>
+<li>Sensitive keys/secrets handling is not fully hardened.</li>
+<li>Default/fallback secret key behavior is unsafe for production if unchanged.</li>
+<li>CORS is currently broad and should be restricted.</li>
+</ul>
+<h3 id="reliability-limitations">Reliability limitations</h3>
+<ul>
+<li>Some workflows still depend on external webhook availability.</li>
+<li>OA score extraction from external pages is best-effort and can break if provider HTML changes.</li>
+</ul>
+<h3 id="product-limitations">Product limitations</h3>
+<ul>
+<li>Candidate portal has partial business context in some fields.</li>
+<li>Analytics/reporting depth is currently limited.</li>
+<li>Onboarding flow is initiated but not full lifecycle-managed in this repository.</li>
+</ul>
+<h3 id="engineering-limitations">Engineering limitations</h3>
+<ul>
+<li>Limited formal automated test coverage.</li>
+<li>No complete CI/CD quality gate documented yet.</li>
+</ul>
+<h2 id="recommended-next-milestones">Recommended next milestones</h2>
+<ol>
+<li>Security hardening sprint (secrets, CORS, token policy, RBAC audit).</li>
+<li>Testing sprint (unit/integration/e2e with CI).</li>
+<li>Observability sprint (logs, metrics, health checks, alerting).</li>
+<li>Workflow resilience sprint (retry/dead-letter/idempotency around webhooks).</li>
+</ol>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../status/" class="btn btn-neutral float-left" title="Project Status"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../troubleshooting/" class="btn btn-neutral float-right" title="Troubleshooting">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href="../status/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../troubleshooting/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

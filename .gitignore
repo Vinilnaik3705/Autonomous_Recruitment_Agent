@@ -49,3 +49,19 @@ docs/
 
 # Debug outputs
 debug_output*.txt
+
+# Local secrets and recovery dumps
+secrets.toml
+.recovery/
+
+
+# Python cache
+**/__pycache__/
+*.pyc
+
+
+# Workflow exports with embedded credentials
+01_Resume_Screening_Atomic_updated.json
+fix_webhook_nodes.json
+
+fix_webhook.sql

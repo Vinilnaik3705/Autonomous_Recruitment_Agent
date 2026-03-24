@@ -6,100 +6,92 @@ from typing import Generator, Optional
 
 def get_db_config():
     """Load database config from environment variables (priority) or secrets.toml."""
+    # 1. DATABASE_URL (Docker / Production priority)
+    if os.getenv("DATABASE_URL"):
+        return {"dsn": os.getenv("DATABASE_URL")}
+
     config = {}
-    
-    # Load secrets.toml if available
+    # 2. Load secrets.toml if available (Local Dev)
     if os.path.exists("secrets.toml"):
         try:
             secrets = toml.load("secrets.toml")
             config = secrets.get('database', {})
-        except Exception: pass
+        except Exception as e:
+            print(f"Warning: Could not load secrets.toml: {e}")
     elif os.path.exists("../secrets.toml"):
         try:
             secrets = toml.load("../secrets.toml")
             config = secrets.get('database', {})
-        except Exception: pass
-
-    # Get values from env or config
-    host = os.getenv('DB_HOST', config.get('host', 'localhost'))
-    database = os.getenv('DB_NAME', config.get('name', 'hr_db'))
-    user = os.getenv('DB_USER', config.get('user', 'hr_user'))
-    password = os.getenv('DB_PASSWORD', config.get('password', 'hr_pass'))
-    port = os.getenv('DB_PORT', config.get('port', 5433))
-
-    # Also handle DATABASE_URL if present, but extract components for better fallback
-    db_url = os.getenv("DATABASE_URL")
-    if db_url and "postgres" in db_url:
-        # Simple extraction if possible, else use as is
-        print(f"--> DB CONFIG: DATABASE_URL detected.")
-        return {"dsn": db_url}
-
+        except Exception as e:
+            print(f"Warning: Could not load ../secrets.toml: {e}")
+    
+    # 3. Return Dictionary (Env vars override config file if needed, or fallback)
     return {
-        'host': host,
-        'database': database,
-        'user': user,
-        'password': password,
-        'port': port
+        'host': os.getenv('DB_HOST', config.get('host', 'localhost')),
+        'database': os.getenv('DB_NAME', config.get('name', 'hr_db')),
+        'user': os.getenv('DB_USER', config.get('user', 'hr_user')),
+        'password': os.getenv('DB_PASSWORD', config.get('password', 'hr_pass')),
+        'port': os.getenv('DB_PORT', config.get('port', 5433))
     }
 
-# Simple global cache to remember what worked
-_worked_config: Optional[dict] = None
-
 def get_db_connection():
-    """Create a new database connection with smart host/port fallback."""
-    global _worked_config
-    
-    if _worked_config:
-        try:
-            return psycopg2.connect(**_worked_config, connect_timeout=1)
-        except Exception:
-            _worked_config = None # Reset cache if it fails
+    """Create a new database connection to PostgreSQL."""
+    config = get_db_config()
 
-    base_config = get_db_config()
-    
-    # If using DSN, we have limited fallback unless we parse it.
-    if "dsn" in base_config:
+    def _display_target(db_config):
+        if db_config.get("dsn"):
+            return "DATABASE_URL DSN"
+        return f"{db_config.get('host')}:{db_config.get('port')} (DB: {db_config.get('database')})"
+
+    attempts = [("primary", dict(config))]
+
+    if "dsn" not in config:
+        host = str(config.get("host", "")).strip().lower()
+        port = str(config.get("port", "5432"))
+        enable_port_fallback = os.getenv("DB_ENABLE_PORT_FALLBACK", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+        if host == "postgres":
+            localhost_config = dict(config)
+            localhost_config["host"] = "localhost"
+            attempts.append(("host fallback postgres->localhost", localhost_config))
+
+        if enable_port_fallback:
+            if port == "5433":
+                port_fallback_config = dict(config)
+                port_fallback_config["port"] = 5432
+                attempts.append(("port fallback 5433->5432", port_fallback_config))
+
+                if host == "postgres":
+                    combined_fallback = dict(config)
+                    combined_fallback["host"] = "localhost"
+                    combined_fallback["port"] = 5432
+                    attempts.append(("host+port fallback", combined_fallback))
+            elif port == "5432":
+                # In this project, Docker Postgres is commonly published as 5433 on host.
+                port_fallback_config = dict(config)
+                port_fallback_config["port"] = 5433
+                attempts.append(("port fallback 5432->5433", port_fallback_config))
+
+    last_error = None
+    for label, attempt in attempts:
         try:
-            conn = psycopg2.connect(dsn=base_config["dsn"], connect_timeout=2)
-            _worked_config = {"dsn": base_config["dsn"]}
+            if "port" in attempt:
+                attempt["port"] = int(attempt.get("port", 5432))
+            print(f"--> DB CONNECT: Attempt ({label}) -> {_display_target(attempt)}")
+            conn = psycopg2.connect(**attempt)
+            print("--> DB CONNECT: Success!")
             return conn
-        except Exception as e:
-            print(f"--> DB CONNECT: DSN failed: {e}. Trying localhost fallbacks...")
+        except psycopg2.OperationalError as e:
+            last_error = e
+            print(f"--> DB CONNECT: Attempt failed ({label}): {e}")
 
-    # Aggressive fallback list for local dev
-    hosts = ['127.0.0.1', 'localhost', 'postgres']
-    ports = [5433, 5432]
-    
-    # Prioritize values from config
-    prio_host = base_config.get('host')
-    prio_port = int(base_config.get('port', 5433))
-    
-    if prio_host in hosts: hosts.remove(prio_host)
-    hosts.insert(0, prio_host)
-    if prio_port in ports: ports.remove(prio_port)
-    ports.insert(0, prio_port)
-
-    for host in hosts:
-        for port in ports:
-            try:
-                test_config = {
-                    'host': host,
-                    'port': port,
-                    'database': base_config.get('database', 'hr_db'),
-                    'user': base_config.get('user', 'hr_user'),
-                    'password': base_config.get('password', 'hr_pass'),
-                    'connect_timeout': 1
-                }
-                conn = psycopg2.connect(**test_config)
-                print(f"--> DB CONNECT: Success on {host}:{port}!")
-                # Remove timeout from cached config for actual usage if desired, 
-                # but connect_timeout=1 is usually fine.
-                _worked_config = test_config
-                return conn
-            except Exception:
-                continue
-            
-    raise Exception("Database connection failed. Tried multiple hosts/ports. Is PostgreSQL running?")
+    print(f"Database connection failed after {len(attempts)} attempt(s): {last_error}")
+    raise last_error
 
 def get_db_cursor() -> Generator:
     """Context manager for database cursor."""
@@ -115,9 +107,6 @@ def get_db_cursor() -> Generator:
         conn.close()
 
 def close_db(db):
-    """Safely close database connection."""
-    if db is not None:
-        try:
-            db.close()
-        except Exception as e:
-            print(f"Warning: Error closing database connection: {e}")
+    """Close database connection."""
+    if db:
+        db.close()

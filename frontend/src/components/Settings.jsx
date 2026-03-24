@@ -7,8 +7,8 @@ import {
 
 const Settings = ({ user }) => {
     const [profile, setProfile] = useState({
-        username: user?.username || 'Vinil Naik',
-        email: user?.email || 'vinil@example.com',
+        username: user?.username || 'User',
+        email: user?.email || '',
         role: user?.role || 'Senior Recruiter',
         bio: 'AI-focused talent acquisition specialist with 5+ years of experience.'
     });

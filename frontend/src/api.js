@@ -2,10 +2,70 @@ import axios from 'axios';
 
 const API_BASE_URL = '/api';
 
+// Simple client-side cache for GET requests
+const requestCache = {
+    data: {},
+    inFlight: {},
+};
+
+const getCacheKey = (url, params = {}) => {
+    const paramStr = Object.keys(params)
+        .sort()
+        .map(k => `${k}=${JSON.stringify(params[k])}`)
+        .join('&');
+    return `${url}${paramStr ? '?' + paramStr : ''}`;
+};
+
+const getCachedResponse = (cacheKey) => {
+    const cached = requestCache.data[cacheKey];
+    if (!cached) return null;
+    
+    const age = (Date.now() - cached.timestamp) / 1000;
+    // Cache TTL: 20 seconds for interview status, 60 seconds for notifications
+    const ttl = cacheKey.includes('interviewstatus') ? 20 : 60;
+    
+    if (age < ttl) {
+        return cached.response;
+    }
+    
+    // Expired, remove from cache
+    delete requestCache.data[cacheKey];
+    return null;
+};
+
 const api = axios.create({
     baseURL: API_BASE_URL,
     timeout: 300000, // 5 minutes
 });
+
+api.interceptors.request.use((config) => {
+    const token = localStorage.getItem('auth_token');
+    if (token) {
+        config.headers = config.headers || {};
+        config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+});
+
+// Add response caching and request deduplication for GET requests
+api.interceptors.response.use(
+    (response) => {
+        if (response.config.method === 'get') {
+            const cacheKey = getCacheKey(response.config.url, response.config.params);
+            requestCache.data[cacheKey] = {
+                response: response.data,
+                timestamp: Date.now(),
+            };
+            delete requestCache.inFlight[cacheKey];
+        }
+        return response;
+    },
+    (error) => {
+        const cacheKey = getCacheKey(error.config.url, error.config.params);
+        delete requestCache.inFlight[cacheKey];
+        return Promise.reject(error);
+    }
+);
 
 export const extractTextFromJD = async (file) => {
     const formData = new FormData();
@@ -80,8 +140,45 @@ export const createJobDescription = async (jobData) => {
 };
 
 export const getInterviewStatus = async () => {
-    const response = await api.get('/jobs/interviewstatus');
-    return response.data;
+    const cacheKey = getCacheKey('/jobs/interviewstatus');
+    
+    // Check if we have a cached response within TTL
+    const cached = getCachedResponse(cacheKey);
+    if (cached) {
+        return cached;
+    }
+    
+    // Check if a request is already in flight to avoid duplicate network calls
+    if (requestCache.inFlight[cacheKey]) {
+        return requestCache.inFlight[cacheKey];
+    }
+    
+    // Make the request and track it
+    const promise = api.get('/jobs/interviewstatus').then(res => res.data);
+    requestCache.inFlight[cacheKey] = promise;
+    
+    return promise;
+};
+
+export const getNotifications = async () => {
+    const cacheKey = getCacheKey('/notifications');
+    
+    // Check if we have a cached response within TTL
+    const cached = getCachedResponse(cacheKey);
+    if (cached) {
+        return cached;
+    }
+    
+    // Check if a request is already in flight
+    if (requestCache.inFlight[cacheKey]) {
+        return requestCache.inFlight[cacheKey];
+    }
+    
+    // Make the request and track it
+    const promise = api.get('/notifications').then(res => res.data);
+    requestCache.inFlight[cacheKey] = promise;
+    
+    return promise;
 };
 
 export const clearAllInterviews = async () => {
@@ -89,8 +186,14 @@ export const clearAllInterviews = async () => {
     return response.data;
 };
 
-export const getNotifications = async () => {
-    const response = await api.get('/notifications');
+export const submitOAResultFromUrl = async ({ candidateEmail, candidateName, reportUrl }) => {
+    const payload = {
+        candidate_email: candidateEmail,
+        candidate_name: candidateName,
+        report_url: reportUrl,
+    };
+
+    const response = await api.post('/oa/submit-from-url', payload);
     return response.data;
 };
 

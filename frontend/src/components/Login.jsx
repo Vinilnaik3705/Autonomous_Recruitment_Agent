@@ -1,8 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { Mail, Lock, User, Loader2, AlertCircle, CheckCircle, Eye, EyeOff, ChevronDown, Github } from 'lucide-react'
-import { useGoogleLogin } from '@react-oauth/google'
 import meetingImg from '../assets/meeting.jpg'
+
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '76310066582-4gc0f508beb6rqaa6aviqu1rabocdalk.apps.googleusercontent.com'
+const GOOGLE_REDIRECT_URI = import.meta.env.VITE_GOOGLE_REDIRECT_URI || window.location.origin
+const GOOGLE_LOGIN_HINT = import.meta.env.VITE_GOOGLE_LOGIN_HINT || ''
 
 export default function Login() {
   const auth = useAuth()
@@ -37,24 +40,28 @@ export default function Login() {
     }
     document.addEventListener('mousedown', handleClickOutside)
 
-    // Handle GitHub OAuth callback
-    const urlParams = new URLSearchParams(window.location.search)
-    const code = urlParams.get('code')
-    if (code) {
-      // Clear code from URL to prevent re-execution
-      window.history.replaceState({}, document.title, window.location.pathname)
-      handleGithubCallback(code)
+    const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''))
+    const oauthToken = hashParams.get('access_token')
+    const oauthError = hashParams.get('error')
+
+    if (oauthError) {
+      setError('Google login was cancelled or failed. Please try again.')
+      window.history.replaceState({}, document.title, window.location.pathname + window.location.search)
+    } else if (oauthToken) {
+      window.history.replaceState({}, document.title, window.location.pathname + window.location.search)
+      handleGoogleAccessToken(oauthToken)
     }
 
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
 
-  const handleGithubCallback = async (code) => {
+  const handleGoogleAccessToken = async (accessToken, socialModeOverride = null) => {
     setLoading(true)
     setError('')
     try {
-      const data = await auth.loginSocial(code, 'github', formData.role)
-      setSuccess('GitHub login successful!')
+      const socialMode = socialModeOverride || (isLogin ? 'login' : 'signup')
+      const data = await auth.loginSocial(accessToken, 'google', formData.role, socialMode)
+      setSuccess(socialMode === 'login' ? 'Google login successful!' : 'Google signup successful!')
       const role = data?.user?.role || (auth.user && auth.user.role)
       const rolePaths = {
         recruiter: '/recruiter',
@@ -65,10 +72,38 @@ export default function Login() {
       const target = rolePaths[role] || '/dashboard'
       window.location.href = target
     } catch (err) {
-      setError(err.message || 'GitHub login failed')
+      const message = err.message || 'Google login failed'
+      if (message.toLowerCase().includes('please sign up first')) {
+        setIsLogin(false)
+      }
+      setError(message)
     } finally {
       setLoading(false)
     }
+  }
+
+  const loadGoogleIdentityScript = async () => {
+    if (window.google?.accounts?.oauth2) {
+      return true
+    }
+
+    return new Promise((resolve, reject) => {
+      const existing = document.querySelector('script[data-google-identity="true"]')
+      if (existing) {
+        existing.addEventListener('load', () => resolve(true), { once: true })
+        existing.addEventListener('error', () => reject(new Error('Failed to load Google Identity script')), { once: true })
+        return
+      }
+
+      const script = document.createElement('script')
+      script.src = 'https://accounts.google.com/gsi/client'
+      script.async = true
+      script.defer = true
+      script.setAttribute('data-google-identity', 'true')
+      script.onload = () => resolve(true)
+      script.onerror = () => reject(new Error('Failed to load Google Identity script'))
+      document.head.appendChild(script)
+    })
   }
 
   const handleSubmit = (e) => {
@@ -105,7 +140,11 @@ export default function Login() {
       const target = rolePaths[role] || '/dashboard'
       window.location.href = target
     } catch (err) {
-      setError(err.message || 'Login failed')
+      const message = err.message || 'Login failed'
+      if (message.toLowerCase().includes('please sign up first')) {
+        setIsLogin(false)
+      }
+      setError(message)
     } finally {
       setLoading(false)
     }
@@ -134,42 +173,66 @@ export default function Login() {
     }
   }
 
-  const googleLogin = useGoogleLogin({
-    onSuccess: async (tokenResponse) => {
-      setLoading(true)
-      setError('')
-      try {
-        const data = await auth.loginSocial(tokenResponse.access_token, 'google', formData.role)
-        setSuccess('Google login successful!')
-        const role = data?.user?.role || (auth.user && auth.user.role)
-        const rolePaths = {
-          recruiter: '/recruiter',
-          interviewer: '/interviewer',
-          candidate: '/candidate',
-          super_admin: '/admin'
-        }
-        const target = rolePaths[role] || '/dashboard'
-        window.location.href = target
-      } catch (err) {
-        setError(err.message || 'Google login failed')
-      } finally {
-        setLoading(false)
-      }
-    },
-    onError: error => {
-      setError('Google Login Failed')
-      console.error(error)
+  const canReachGoogle = async () => {
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), 5000)
+    try {
+      await fetch('https://accounts.google.com/gsi/client', {
+        method: 'GET',
+        mode: 'no-cors',
+        cache: 'no-store',
+        signal: controller.signal
+      })
+      return true
+    } catch {
+      return false
+    } finally {
+      window.clearTimeout(timeoutId)
     }
-  })
+  }
 
   const handleSocialLogin = async (provider) => {
     if (provider === 'google') {
-      googleLogin()
+      setLoading(true)
+      setError('')
+      const reachable = await canReachGoogle()
+      if (!reachable) {
+        setLoading(false)
+        setError('Google is blocked or unreachable on this network. Disable VPN/proxy/firewall filtering or switch DNS/network, then retry.')
+        return
+      }
+
+      const socialMode = isLogin ? 'login' : 'signup'
+
+      try {
+        await loadGoogleIdentityScript()
+
+        if (!window.google?.accounts?.oauth2) {
+          throw new Error('Google Identity SDK is unavailable')
+        }
+
+        const tokenClient = window.google.accounts.oauth2.initTokenClient({
+          client_id: GOOGLE_CLIENT_ID,
+          scope: 'openid email profile',
+          prompt: 'select_account',
+          callback: async (tokenResponse) => {
+            if (tokenResponse?.error || !tokenResponse?.access_token) {
+              setError(tokenResponse?.error_description || tokenResponse?.error || 'Google login failed')
+              setLoading(false)
+              return
+            }
+            await handleGoogleAccessToken(tokenResponse.access_token, socialMode)
+          }
+        })
+
+        tokenClient.requestAccessToken()
+        return
+      } catch {
+        setLoading(false)
+        setError(`Google sign-in could not start. Verify your Authorized JavaScript origins include ${window.location.origin} and that your Google Client ID is correct.`)
+      }
     } else if (provider === 'github') {
-      const clientId = "Ov23liLdm7eOHKd3nbmo"
-      const redirectUri = window.location.origin + '/login'
-      const ghAuthUrl = `https://github.com/login/oauth/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&scope=user:email`
-      window.location.href = ghAuthUrl
+      setError('GitHub login is not configured yet. Please use email/password or Google login.')
     } else {
       setError(`${provider} login is currently under development.`);
     }
@@ -319,10 +382,11 @@ export default function Login() {
               <button
                 type="button"
                 onClick={() => handleSocialLogin('github')}
+                disabled
                 className="flex items-center justify-center gap-2 px-4 py-3 bg-white/50 border border-gray-100 rounded-2xl hover:bg-white transition-all shadow-sm text-sm font-medium"
               >
                 <Github className="w-5 h-5" />
-                GitHub
+                GitHub (Soon)
               </button>
               <button
                 type="button"
@@ -330,7 +394,7 @@ export default function Login() {
                 className="flex items-center justify-center gap-2 px-4 py-3 bg-white/50 border border-gray-100 rounded-2xl hover:bg-white transition-all shadow-sm text-sm font-medium"
               >
                 <svg className="w-5 h-5" viewBox="0 0 24 24"><path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" /><path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" /><path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" /><path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 12-5.38z" /></svg>
-                Google
+                {isLogin ? 'Google Sign in' : 'Google Sign up'}
               </button>
             </div>
           </div>

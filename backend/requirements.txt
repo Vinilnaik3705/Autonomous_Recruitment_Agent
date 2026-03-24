@@ -19,5 +19,3 @@ sentence-transformers
 requests
 tf-keras
 PyJWT
-razorpay
-httpx

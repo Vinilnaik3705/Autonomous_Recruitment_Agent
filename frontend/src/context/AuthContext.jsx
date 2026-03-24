@@ -178,19 +178,28 @@ export const AuthProvider = ({ children }) => {
   };
 
   // Social login/register
-  const loginSocial = async (credential, provider, role = 'recruiter') => {
+  const loginSocial = async (credential, provider, role = 'recruiter', mode = 'login') => {
     setLoading(true);
     setError(null);
     try {
       const response = await fetch('/api/auth/social', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ credential, provider, role })
+        body: JSON.stringify({ credential, provider, role, mode })
       });
 
       if (!response.ok) {
         const rawText = await response.text();
-        throw new Error(rawText || 'Social login failed');
+        let errorMessage = 'Social login failed';
+        if (rawText) {
+          try {
+            const errorData = JSON.parse(rawText);
+            errorMessage = errorData.detail || errorMessage;
+          } catch (parseError) {
+            errorMessage = rawText;
+          }
+        }
+        throw new Error(errorMessage);
       }
 
       const data = await response.json();

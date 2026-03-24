@@ -1,6 +1,8 @@
+name: automated_res
+
 services:
   postgres:
-    image: postgres:16
+    image: postgres:16-alpine
     container_name: hr_postgres
     restart: unless-stopped
     environment:
@@ -10,63 +12,70 @@ services:
     ports:
       - "5433:5432"
     volumes:
-      - hr_postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/01-create-n8n-db.sql:/docker-entrypoint-initdb.d/01-create-n8n-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hr_user -d hr_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   fastapi:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: hr_fastapi
     restart: unless-stopped
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgresql://hr_user:hr_pass@postgres:5432/hr_db
-      N8N_WEBHOOK_URL: http://n8n:5678/webhook/resume-upload-atomic
-      BACKEND_WEBHOOK_URL: http://fastapi:8000/email/onboarding-welcome
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: hr_db
+      DB_USER: hr_user
+      DB_PASSWORD: hr_pass
+      N8N_SCHEDULE_WEBHOOK_URL: http://n8n:5678/webhook/schedule-interviews
     ports:
       - "8000:8000"
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
     volumes:
       - ./backend:/app/backend
       - ./secrets.toml:/app/secrets.toml:ro
-      - hf_model_cache:/root/.cache/huggingface
+    working_dir: /app
+    command: >
+      sh -c "python backend/init_db.py && uvicorn backend.main:app --host 0.0.0.0 --port 8000"
 
   n8n:
     image: n8nio/n8n:latest
     container_name: hr_n8n
     restart: unless-stopped
     depends_on:
-      - postgres
-      - fastapi
+      postgres:
+        condition: service_healthy
+      fastapi:
+        condition: service_started
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: "5432"
+      DB_POSTGRESDB_DATABASE: n8n_db
+      DB_POSTGRESDB_USER: hr_user
+      DB_POSTGRESDB_PASSWORD: hr_pass
+      N8N_HOST: localhost
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: http
+      N8N_EDITOR_BASE_URL: http://localhost:5678
+      N8N_WEBHOOK_URL: http://localhost:5678/
+      WEBHOOK_URL: http://localhost:5678/
+      N8N_SECURE_COOKIE: "false"
+      GENERIC_TIMEZONE: Asia/Kolkata
+      TZ: Asia/Kolkata
     ports:
       - "5678:5678"
-    environment:
-      - N8N_HOST=127.0.0.1
-      - N8N_PORT=5678
-      - N8N_PROTOCOL=http
-      - N8N_WEBHOOK_URL=http://n8n:5678/webhook
-      - NODE_ENV=production
-      - GENERIC_TIMEZONE=Asia/Kolkata
-      - N8N_BINARY_DATA_MODE=filesystem
-      - EXECUTIONS_DATA_SAVE_ON_ERROR=all
-      - EXECUTIONS_DATA_SAVE_ON_SUCCESS=all
-      - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_HOST=postgres
-      - DB_POSTGRESDB_PORT=5432
-      - DB_POSTGRESDB_DATABASE=n8n_db
-      - DB_POSTGRESDB_USER=hr_user
-      - DB_POSTGRESDB_PASSWORD=hr_pass
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - N8N_WEBHOOK_URL_BASE=http://n8n:5678/webhook
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
     volumes:
       - n8n_data:/home/node/.n8n
 
 volumes:
-  hr_postgres_data:
+  postgres_data:
   n8n_data:
-  hf_model_cache:

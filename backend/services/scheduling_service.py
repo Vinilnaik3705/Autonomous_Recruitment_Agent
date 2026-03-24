@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
-from backend.database import get_db_connection, close_db
+from backend.database import get_db_connection
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import smtplib
@@ -18,19 +18,20 @@ import smtplib
 # ---------------------------------------------------------------------------
 PANEL_TEMPLATES = {
     "default": [
-        {"round": 1, "label": "DSA Round",        "department": "Engineering", "format": "video call"},
+        {"round": 1, "label": "HR Screen",       "department": "HR",          "format": "video call"},
         {"round": 2, "label": "Technical Round",  "department": "Engineering", "format": "video call"},
-        {"round": 3, "label": "HR Round",         "department": "HR",          "format": "video call"},
+        {"round": 3, "label": "Manager Round",    "department": "Management",  "format": "video call"},
     ],
     "engineering": [
-        {"round": 1, "label": "DSA Round",        "department": "Engineering", "format": "video call"},
-        {"round": 2, "label": "Technical Round",  "department": "Engineering", "format": "video call"},
-        {"round": 3, "label": "HR Round",         "department": "HR",          "format": "video call"},
+        {"round": 1, "label": "HR Screen",        "department": "HR",          "format": "video call"},
+        {"round": 2, "label": "Technical Round 1","department": "Engineering", "format": "video call"},
+        {"round": 3, "label": "Technical Round 2","department": "Engineering", "format": "video call"},
+        {"round": 4, "label": "Manager Round",    "department": "Management",  "format": "video call"},
     ],
     "sales": [
-        {"round": 1, "label": "DSA Round",        "department": "Engineering", "format": "phone"},
+        {"round": 1, "label": "HR Screen",        "department": "HR",          "format": "phone"},
         {"round": 2, "label": "Skills Assessment","department": "Sales",       "format": "video call"},
-        {"round": 3, "label": "HR Round",         "department": "HR",          "format": "in-person"},
+        {"round": 3, "label": "Director Round",   "department": "Management",  "format": "in-person"},
     ],
 }
 
@@ -81,25 +82,23 @@ class SchedulingService:
     # ------------------------------------------------------------------
 
     def get_interviewers(self) -> List[Dict]:
-        conn = None
+        conn = get_db_connection()
         try:
-            conn = get_db_connection()
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT id, name, email, timezone FROM interviewers WHERE is_active = TRUE"
                 )
                 return cur.fetchall()
         finally:
-            close_db(conn)
+            conn.close()
 
     def get_load_balanced_interviewer(self, department: Optional[str] = None) -> Optional[Dict]:
         """
         Return the active interviewer with the fewest interviews this week.
         Optionally filter by department (stored in a 'department' column if present).
         """
-        conn = None
+        conn = get_db_connection()
         try:
-            conn = get_db_connection()
             with conn.cursor() as cur:
                 # Count interviews per interviewer in the current week
                 query = """
@@ -126,7 +125,7 @@ class SchedulingService:
                     }
                 return None
         finally:
-            close_db(conn)
+            conn.close()
 
     # ------------------------------------------------------------------
     # Slot generation
@@ -143,7 +142,6 @@ class SchedulingService:
 
     def _get_calendar_slots(self, interviewer_id: int, date_str: str) -> List[str]:
         """Query Google Calendar free/busy and return open 1-hour slots."""
-        conn = None
         try:
             conn = get_db_connection()
             with conn.cursor() as cur:
@@ -152,6 +150,7 @@ class SchedulingService:
                     (interviewer_id,),
                 )
                 row = cur.fetchone()
+            conn.close()
 
             calendar_id = (row[0] if row and row[0] else "primary")
             tz_name = (row[1] if row and row[1] else "UTC")
@@ -186,8 +185,6 @@ class SchedulingService:
         except Exception as e:
             print(f"Calendar slot fetch failed: {e}")
             return self._generate_default_slots(date_str)
-        finally:
-            close_db(conn)
 
     def _generate_default_slots(self, date_str: str, num_slots: int = 5) -> List[str]:
         """Return up to `num_slots` default business-hour slots on the given date."""
@@ -230,7 +227,7 @@ class SchedulingService:
         interviewer_id: int,
         slot_iso: str,
         round_number: int = 1,
-        round_label: str = "DSA Round",
+        round_label: str = "Interview",
         interview_format: str = "video call",
         google_event_id: Optional[str] = None,
         meeting_link: Optional[str] = None,
@@ -239,28 +236,15 @@ class SchedulingService:
         Persist an interview record and send an invite email to the candidate.
         Returns the new interview_schedule id.
         """
-        conn = None
+        conn = get_db_connection()
         try:
-            conn = get_db_connection()
             with conn.cursor() as cur:
-                # Duplicate check: don't schedule the same round if already exists for this candidate
-                cur.execute(
-                    """
-                    SELECT id FROM interview_schedules 
-                    WHERE candidate_email = %s AND round_number = %s AND status != 'cancelled'
-                    """,
-                    (candidate_data["email"], round_number)
-                )
-                if cur.fetchone():
-                    print(f"Skipping: Candidate {candidate_data['email']} already has Round {round_number} scheduled.")
-                    return -1
-
                 cur.execute(
                     """
                     INSERT INTO interview_schedules
                         (candidate_name, candidate_email, interviewer_id, scheduled_time,
-                         status, google_event_id, round_number, round_label, meeting_link)
-                    VALUES (%s, %s, %s, %s, 'scheduled', %s, %s, %s, %s)
+                         status, google_event_id)
+                    VALUES (%s, %s, %s, %s, 'scheduled', %s)
                     RETURNING id
                     """,
                     (
@@ -269,9 +253,6 @@ class SchedulingService:
                         interviewer_id,
                         slot_iso,
                         google_event_id or "N/A",
-                        round_number,
-                        round_label,
-                        meeting_link
                     ),
                 )
                 interview_id = cur.fetchone()[0]
@@ -285,11 +266,10 @@ class SchedulingService:
             )
             return interview_id
         except Exception as e:
-            if conn:
-                conn.rollback()
+            conn.rollback()
             raise e
         finally:
-            close_db(conn)
+            conn.close()
 
     def reschedule_interview(
         self, interview_id: int, candidate_data: Dict, new_slot_iso: str
@@ -297,9 +277,8 @@ class SchedulingService:
         """
         Update an existing interview to a new time slot and re-notify candidate.
         """
-        conn = None
+        conn = get_db_connection()
         try:
-            conn = get_db_connection()
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -313,11 +292,10 @@ class SchedulingService:
             self.send_invite_email(candidate_data, new_slot_iso, round_label="Rescheduled Interview")
             return True
         except Exception as e:
-            if conn:
-                conn.rollback()
+            conn.rollback()
             raise e
         finally:
-            close_db(conn)
+            conn.close()
 
     # ------------------------------------------------------------------
     # No-show handling
@@ -325,9 +303,8 @@ class SchedulingService:
 
     def flag_no_show(self, interview_id: int) -> bool:
         """Mark an interview as no-show and send HR a notification."""
-        conn = None
+        conn = get_db_connection()
         try:
-            conn = get_db_connection()
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE interview_schedules SET status = 'no_show' WHERE id = %s",
@@ -337,20 +314,18 @@ class SchedulingService:
             print(f"[NoShow] Interview {interview_id} flagged as no-show.")
             return True
         except Exception as e:
-            if conn:
-                conn.rollback()
+            conn.rollback()
             raise e
         finally:
-            close_db(conn)
+            conn.close()
 
     def get_no_show_interviews(self, grace_minutes: int = 15) -> List[Dict]:
         """
         Return scheduled interviews whose start time passed more than
         `grace_minutes` ago and are still in 'scheduled' status.
         """
-        conn = None
+        conn = get_db_connection()
         try:
-            conn = get_db_connection()
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -370,7 +345,7 @@ class SchedulingService:
                     for r in rows
                 ]
         finally:
-            close_db(conn)
+            conn.close()
 
     # ------------------------------------------------------------------
     # Post-interview: feedback kit & aggregation
@@ -381,9 +356,8 @@ class SchedulingService:
         Return interviews whose end time (start + 1 hour) just passed within
         the last `window_minutes` minutes and feedback has not yet been sent.
         """
-        conn = None
+        conn = get_db_connection()
         try:
-            conn = get_db_connection()
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -394,7 +368,6 @@ class SchedulingService:
                     JOIN interviewers i ON s.interviewer_id = i.id
                     WHERE s.status = 'scheduled'
                     AND s.feedback_submitted = FALSE
-                    AND s.kit_sent = FALSE
                     AND s.scheduled_time + INTERVAL '1 hour'
                         BETWEEN NOW() - INTERVAL '%s minutes' AND NOW()
                     """,
@@ -411,7 +384,7 @@ class SchedulingService:
                     for r in rows
                 ]
         finally:
-            close_db(conn)
+            conn.close()
 
     def aggregate_feedback_and_decide(self, interview_id: int) -> str:
         """
@@ -419,9 +392,8 @@ class SchedulingService:
         Returns 'pass', 'fail', or 'hold' based on the average overall rating.
         Thresholds: pass >= 7/10, fail < 5/10, else hold.
         """
-        conn = None
+        conn = get_db_connection()
         try:
-            conn = get_db_connection()
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -455,15 +427,39 @@ class SchedulingService:
             conn.commit()
             return decision
         except Exception as e:
-            if conn:
-                conn.rollback()
+            conn.rollback()
             raise e
         finally:
-            close_db(conn)
+            conn.close()
 
     # ------------------------------------------------------------------
     # Email helpers
     # ------------------------------------------------------------------
+
+    def _format_slot_for_email(self, raw_slot: Optional[str], tz_name: Optional[str] = None) -> str:
+        """Convert ISO/UTC schedule strings into readable local time for emails."""
+        if not raw_slot:
+            return "To Be Confirmed"
+
+        display_tz_name = tz_name or os.getenv("INTERVIEW_DISPLAY_TIMEZONE") or os.getenv("APP_TIMEZONE") or "Asia/Kolkata"
+        try:
+            display_tz = pytz.timezone(display_tz_name)
+        except Exception:
+            display_tz = pytz.timezone("UTC")
+
+        value = str(raw_slot).strip()
+        try:
+            if value.endswith("Z"):
+                value = value[:-1] + "+00:00"
+
+            dt = datetime.fromisoformat(value)
+            if dt.tzinfo is None:
+                dt_local = display_tz.localize(dt)
+            else:
+                dt_local = dt.astimezone(display_tz)
+            return dt_local.strftime("%d %b %Y, %I:%M %p (%Z)")
+        except Exception:
+            return str(raw_slot)
 
     def send_invite_email(
         self,
@@ -481,10 +477,12 @@ class SchedulingService:
             print("Email config missing – skipping invite email.")
             return
 
+        formatted_confirmed_time = self._format_slot_for_email(slot_iso)
+
         # Format slot options list
         slots_html = ""
         if slot_options:
-            items = "".join(f"<li>{s}</li>" for s in slot_options)
+            items = "".join(f"<li>{self._format_slot_for_email(s)}</li>" for s in slot_options)
             slots_html = f"<p><strong>Available Slots:</strong></p><ul>{items}</ul>"
 
         meeting_section = (
@@ -494,52 +492,29 @@ class SchedulingService:
         )
 
         html_body = f"""
-        <!DOCTYPE html><html><body style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#333;line-height:1.6;">
-        <div style="max-width:600px;margin:auto;padding:20px;border:1px solid #e1e4e8;border-radius:12px;">
-          <div style="background:linear-gradient(135deg,#6366f1,#a855f7);color:white;padding:40px 20px;border-radius:10px 10px 0 0;text-align:center;">
-            <h1 style="margin:0;font-size:28px;font-weight:800;letter-spacing:-0.5px;">You're Invited to Interview!</h1>
-            <p style="margin-top:10px;opacity:0.9;font-size:18px;font-weight:500;">Round {round_number}: {round_label}</p>
+        <!DOCTYPE html><html><body style="font-family:Arial,sans-serif;color:#333;">
+        <div style="max-width:600px;margin:auto;padding:20px;">
+          <div style="background:linear-gradient(135deg,#667eea,#764ba2);color:white;padding:30px;border-radius:10px 10px 0 0;text-align:center;">
+            <h1>Interview Invitation</h1>
+            <p>Round {round_number}: {round_label}</p>
           </div>
-          <div style="background:#ffffff;padding:40px 30px;border-radius:0 0 10px 10px;">
-            <p style="font-size:16px;">Dear <strong>{candidate['name']}</strong>,</p>
-            <p style="font-size:16px;">We were impressed by your profile and would like to invite you for the next stage of our recruitment process: <strong>{round_label}</strong>.</p>
-            
-            <div style="background:#f8fafc;border-radius:8px;padding:20px;margin:25px 0;border:1px solid #edf2f7;">
-              <table style="width:100%;border-collapse:collapse;">
-                <tr>
-                  <td style="padding:8px 0;color:#64748b;font-weight:600;width:120px;">Format</td>
-                  <td style="padding:8px 0;color:#1e293b;font-weight:700;">{interview_format.title()}</td>
-                </tr>
-                <tr>
-                  <td style="padding:8px 0;color:#64748b;font-weight:600;">Time</td>
-                  <td style="padding:8px 0;color:#1e293b;font-weight:700;">{slot_iso}</td>
-                </tr>
-                <tr>
-                  <td style="padding:8px 0;color:#64748b;font-weight:600;">Duration</td>
-                  <td style="padding:8px 0;color:#1e293b;font-weight:700;">~60 minutes</td>
-                </tr>
-              </table>
-            </div>
-
+          <div style="background:#f9fafb;padding:30px;border-radius:0 0 10px 10px;">
+            <p>Dear <strong>{candidate['name']}</strong>,</p>
+            <p>We are pleased to invite you for <strong>Round {round_number} – {round_label}</strong>.</p>
+            <ul>
+              <li><strong>Format:</strong> {interview_format.title()}</li>
+                            <li><strong>Confirmed Time:</strong> {formatted_confirmed_time}</li>
+              <li><strong>Duration:</strong> ~60 minutes</li>
+            </ul>
+            {slots_html}
             {meeting_section}
-            
-            <div style="margin-top:30px;padding-top:20px;border-top:1px solid #edf2f7;">
-              <h3 style="font-size:16px;color:#1e293b;margin-bottom:10px;">What to Expect</h3>
-              <ul style="padding-left:20px;margin:0;color:#4a5568;">
-                <li>Discussion of your background and relevant technical experience.</li>
-                <li>Problem-solving exercises focused on {round_label}.</li>
-                <li>Opportunity for you to ask us questions about the team and culture.</li>
-              </ul>
-            </div>
-            
-            <p style="margin-top:30px;font-size:14px;color:#718096;background:#fffaf0;padding:15px;border-left:4px solid #ed8936;border-radius:4px;">
-              <strong>Note:</strong> If you need to reschedule, please reply to this email at least 24 hours in advance.
-            </p>
-            
-            <p style="margin-top:40px;font-size:16px;">Best regards,<br><strong style="color:#4f46e5;">HR Recruiting Team</strong></p>
+            <p><strong>What to expect:</strong> Please be prepared to discuss your background,
+            relevant experience, and technical competencies aligned with the role.</p>
+            <p>If you need to reschedule, please reply to this email at least 24 hours in advance.</p>
+            <br><p>Best regards,<br><strong>HR Recruiting Team</strong></p>
           </div>
-          <p style="text-align:center;font-size:12px;color:#a0aec0;margin-top:20px;font-style:italic;">
-            This is an automated message from our recruitment engine.
+          <p style="text-align:center;font-size:12px;color:#888;margin-top:20px;">
+            This is an automated email from our recruitment system.
           </p>
         </div>
         </body></html>
@@ -575,43 +550,33 @@ class SchedulingService:
             feedback_form_url = f"{base_url}/feedback-form.html"
 
         html_body = f"""
-        <!DOCTYPE html><html><body style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#333;line-height:1.6;">
-        <div style="max-width:600px;margin:auto;padding:20px;border:1px solid #e1e4e8;border-radius:12px;">
-          <div style="background:#1e293b;color:white;padding:30px;border-radius:10px 10px 0 0;">
-            <p style="margin:0;font-size:12px;text-transform:uppercase;font-weight:700;letter-spacing:1px;opacity:0.7;">Interview Preparation</p>
-            <h2 style="margin:5px 0 0 0;font-size:24px;font-weight:800;">Interview Kit: {candidate_name}</h2>
+        <!DOCTYPE html><html><body style="font-family:Arial,sans-serif;color:#333;">
+        <div style="max-width:600px;margin:auto;padding:20px;">
+          <div style="background:#1a202c;color:white;padding:25px;border-radius:10px 10px 0 0;">
+            <h2>Interview Kit – {round_label}</h2>
           </div>
-          <div style="background:#ffffff;padding:30px;border-radius:0 0 10px 10px;">
-            <p style="font-size:16px;">Hi <strong>{interviewer_name}</strong>,</p>
-            <p style="font-size:16px;">You have an upcoming interview scheduled. Below are the details and resources you'll need.</p>
-            
-            <div style="background:#f1f5f9;border-radius:8px;padding:20px;margin:25px 0;">
-              <table style="width:100%;border-collapse:collapse;">
-                <tr><td style="padding:8px 0;color:#64748b;font-weight:600;width:140px;">Candidate</td><td style="padding:8px 0;color:#1e293b;font-weight:700;">{candidate_name}</td></tr>
-                <tr><td style="padding:8px 0;color:#64748b;font-weight:600;">Round</td><td style="padding:8px 0;color:#1e293b;font-weight:700;">{round_label}</td></tr>
-                <tr><td style="padding:8px 0;color:#64748b;font-weight:600;">Scheduled Time</td><td style="padding:8px 0;color:#1e293b;font-weight:700;">{scheduled_time}</td></tr>
-                <tr><td style="padding:8px 0;color:#64748b;font-weight:600;">Candidate Email</td><td style="padding:8px 0;"><a href="mailto:{candidate_email}" style="color:#4f46e5;text-decoration:none;">{candidate_email}</a></td></tr>
-              </table>
-            </div>
-
-            {"<div style='margin-bottom:25px;'><h3 style='font-size:16px;color:#1e293b;border-bottom:2px solid #f1f5f9;padding-bottom:10px;'>Job Context</h3><p style='font-size:14px;color:#475569;'>" + job_description[:500] + "...</p></div>" if job_description else ""}
-            
-            <div style="margin-bottom:25px;">
-              <h3 style="font-size:16px;color:#1e293b;border-bottom:2px solid #f1f5f9;padding-bottom:10px;">Suggested Questions</h3>
-              <ul style="padding-left:20px;margin:0;color:#475569;font-size:14px;">
-                <li style="margin-bottom:8px;">Walk me through your most complex technical architecture or project.</li>
-                <li style="margin-bottom:8px;">How do you approach learning a new technology or framework under pressure?</li>
-                <li style="margin-bottom:8px;">Describe a time you had to resolve a critical production bug or system failure.</li>
-                <li style="margin-bottom:8px;">What are the key considerations when designing for high availability?</li>
-              </ul>
-            </div>
-
-            <div style="text-align:center;margin-top:40px;padding:30px;background:#eef2ff;border-radius:12px;border:1px dashed #6366f1;">
-              <p style="margin:0 0 20px 0;font-weight:600;color:#4338ca;">Please submit your feedback within 24 hours of the interview.</p>
-              <a href="{feedback_form_url}" style="display:inline-block;padding:14px 28px;background:#4f46e5;color:white;border-radius:8px;text-decoration:none;font-weight:700;box-shadow:0 4px 6px -1px rgba(79,70,229,0.4);">Submit Interview Feedback</a>
-            </div>
-
-            <p style="margin-top:40px;font-size:15px;">Happy interviewing!<br><strong>HR Coordination Team</strong></p>
+          <div style="background:#f9fafb;padding:25px;border-radius:0 0 10px 10px;">
+            <p>Hi <strong>{interviewer_name}</strong>,</p>
+            <p>You have an upcoming interview. Here are the details:</p>
+            <table style="width:100%;border-collapse:collapse;">
+              <tr><td style="padding:6px 0;"><strong>Candidate:</strong></td><td>{candidate_name} ({candidate_email})</td></tr>
+              <tr><td style="padding:6px 0;"><strong>Round:</strong></td><td>{round_label}</td></tr>
+              <tr><td style="padding:6px 0;"><strong>Scheduled Time:</strong></td><td>{scheduled_time}</td></tr>
+            </table>
+            {"<h3>Job Description</h3><p>" + job_description[:500] + "...</p>" if job_description else ""}
+            {"<h3>Candidate Resume Summary</h3><p>" + resume_summary[:400] + "...</p>" if resume_summary else ""}
+            <h3>Suggested Interview Questions</h3>
+            <ol>
+              <li>Walk me through your most relevant project experience.</li>
+              <li>Describe a challenging technical problem you solved.</li>
+              <li>How do you handle disagreements within a team?</li>
+              <li>What is your experience with [role-specific skill]?</li>
+              <li>Where do you see yourself in 3 years?</li>
+            </ol>
+            <h3>Feedback Scorecard</h3>
+            <p>Please submit your feedback within 24 hours of the interview:</p>
+            <p><a href="{feedback_form_url}" style="display:inline-block;padding:12px 24px;background:#667eea;color:white;border-radius:5px;text-decoration:none;">Submit Feedback</a></p>
+            <br><p>Best regards,<br><strong>HR Coordination</strong></p>
           </div>
         </div>
         </body></html>
@@ -714,20 +679,3 @@ class SchedulingService:
         except Exception as e:
             print(f"SMTP send failed: {e}")
 
-    def mark_kit_as_sent(self, interview_id: int):
-        """Mark an interview kit as sent in the database."""
-        conn = None
-        try:
-            conn = get_db_connection()
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE interview_schedules SET kit_sent = TRUE WHERE id = %s",
-                    (interview_id,),
-                )
-            conn.commit()
-        except Exception as e:
-            if conn:
-                conn.rollback()
-            raise e
-        finally:
-            close_db(conn)

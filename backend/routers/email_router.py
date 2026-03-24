@@ -1,20 +1,20 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Tuple
+from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import toml
 import os
-from urllib.parse import quote
+import requests
+import pytz
+from urllib.parse import urlencode
 
 router = APIRouter(
     prefix="/email",
     tags=["email"]
 )
-
-OA_SAMPLE_LINK = os.getenv("OA_SAMPLE_LINK", "http://localhost:5173/test-oa.html")
-OA_OFFICIAL_LINK_BASE = os.getenv("OA_OFFICIAL_LINK", "http://localhost:5173/test-oa.html")
 
 # Load SMTP configuration
 def get_smtp_config():
@@ -46,10 +46,51 @@ class EmailRequest(BaseModel):
     # Extended fields for richer templates
     round_number: Optional[int] = 1
     round_label: Optional[str] = "Interview"
+    interview_id: Optional[int] = None
     interview_format: Optional[str] = "video call"
     scheduled_time: Optional[str] = None
     meeting_link: Optional[str] = None
     slot_options: Optional[List[str]] = None
+    oa_link: Optional[str] = None
+    feedback_form_url: Optional[str] = None
+    timezone: Optional[str] = None
+
+
+def _format_scheduled_time_for_email(raw_scheduled_time: Optional[str], tz_name: Optional[str] = None) -> str:
+    """Convert ISO/UTC schedule strings into readable local time for email content."""
+    if not raw_scheduled_time:
+        return "To Be Confirmed"
+
+    display_tz_name = (
+        tz_name
+        or os.getenv("INTERVIEW_DISPLAY_TIMEZONE")
+        or os.getenv("APP_TIMEZONE")
+        or "Asia/Kolkata"
+    )
+
+    try:
+        display_tz = pytz.timezone(display_tz_name)
+    except Exception:
+        display_tz = pytz.timezone("UTC")
+
+    value = str(raw_scheduled_time).strip()
+
+    try:
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+
+        dt = datetime.fromisoformat(value)
+
+        if dt.tzinfo is None:
+            # If no offset is present, treat input as already in display timezone.
+            dt_local = display_tz.localize(dt)
+        else:
+            dt_local = dt.astimezone(display_tz)
+
+        return dt_local.strftime("%d %b %Y, %I:%M %p (%Z)")
+    except Exception:
+        # Preserve original text if parsing fails.
+        return str(raw_scheduled_time)
 
 def _skip_response():
     """Return a safe skip response when candidate data is missing."""
@@ -61,13 +102,48 @@ def _skip_response():
         "skipped": True
     }
 
+
+def _build_oa_launch_link(raw_oa_link: str, candidate_email: str, candidate_name: str) -> str:
+    """Build backend tracking link that redirects to the official OA URL."""
+    public_base = (os.getenv("PUBLIC_API_BASE_URL") or "http://localhost:8000").rstrip("/")
+    launch_url = f"{public_base}/oa/launch"
+    query = urlencode(
+        {
+            "candidate_email": candidate_email,
+            "candidate_name": candidate_name,
+            "target": raw_oa_link,
+        }
+    )
+    return f"{launch_url}?{query}"
+
 @router.post("/oa-practice", response_model=EmailResponse)
 def get_oa_practice_email(req: EmailRequest):
     if not req.candidate_email or not req.candidate_name:
         return _skip_response()
+
+    oa_link = req.oa_link or os.getenv("DEFAULT_OA_LINK", "https://hackerrank.com/sample-test")
+
     return {
-        "subject": "OA Practice Link - Recruiting Team",
-        "body": "Dear Candidate,\n\nPlease find the practice link for the Online Assessment below.\n\nBest,\nRecruiting Team",
+                "subject": "OA Practice Link - Recruiting Team",
+                "body": f"""
+                <!DOCTYPE html><html><body style="font-family:Arial,sans-serif;color:#333;">
+                <div style="max-width:600px;margin:auto;padding:20px;">
+                    <div style="background:#2563eb;color:#fff;padding:22px;border-radius:10px 10px 0 0;text-align:center;">
+                        <h2 style="margin:0;">Practice Online Assessment</h2>
+                    </div>
+                    <div style="background:#f9fafb;padding:24px;border-radius:0 0 10px 10px;">
+                        <p>Dear <strong>{req.candidate_name}</strong>,</p>
+                        <p>Please use the practice assessment link below to get familiar with the test format.</p>
+                        <p style="text-align:center;margin:24px 0;">
+                            <a href="{oa_link}" style="display:inline-block;padding:12px 24px;background:#2563eb;color:#fff;border-radius:6px;text-decoration:none;font-weight:bold;">Open Practice OA</a>
+                        </p>
+                        <p>If the button doesn't work, use this link directly:</p>
+                        <p><a href="{oa_link}">{oa_link}</a></p>
+                        <p>Best regards,<br><strong>Recruiting Team</strong></p>
+                    </div>
+                </div>
+                </body></html>
+                """,
         "recipient_email": req.candidate_email,
         "recipient_name": req.candidate_name
     }
@@ -76,52 +152,43 @@ def get_oa_practice_email(req: EmailRequest):
 def get_oa_original_email(req: EmailRequest):
     if not req.candidate_email or not req.candidate_name:
         return _skip_response()
-    
-    # Build OA link with pre-filled candidate info
-    oa_link = f"{OA_OFFICIAL_LINK_BASE}?email={quote(req.candidate_email)}&name={quote(req.candidate_name)}"
-    
-    html_body = f"""<!DOCTYPE html>
-<html><head><style>
-body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.7; color: #2d3748; background: #f7fafc; margin: 0; padding: 0; }}
-.wrapper {{ background: #f7fafc; padding: 20px 0; }}
-.container {{ max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }}
-.header {{ background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: #ffffff; padding: 40px 30px; text-align: center; }}
-.header h1 {{ margin: 0; font-size: 32px; font-weight: 700; }}
-.header p {{ margin: 8px 0 0 0; opacity: 0.95; font-size: 16px; }}
-.content {{ padding: 40px 30px; }}
-.greeting {{ font-size: 18px; margin: 0 0 20px 0; }}
-.greeting strong {{ color: #f5576c; }}
-.highlight-box {{ background: #fff5f7; border-left: 4px solid #f5576c; padding: 15px 20px; margin: 20px 0; border-radius: 6px; }}
-.highlight-box p {{ margin: 0; color: #2d3748; font-size: 15px; }}
-.feature-list {{ list-style: none; padding: 0; margin: 12px 0; }}
-.feature-list li {{ padding: 8px 0; padding-left: 24px; position: relative; color: #4a5568; }}
-.feature-list li:before {{ content: "◆"; position: absolute; left: 0; color: #f5576c; font-weight: bold; }}
-.button-container {{ text-align: center; margin: 30px 0; }}
-.button {{ display: inline-block; padding: 14px 36px; background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: #ffffff !important; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px; }}
-.footer {{ background: #f7fafc; padding: 20px 30px; text-align: center; border-top: 1px solid #e2e8f0; }}
-.footer p {{ margin: 0; color: #718096; font-size: 13px; }}
-</style></head><body><div class="wrapper"><div class="container">
-<div class="header"><h1>💻 Official Assessment</h1><p>Your Next Challenge Awaits</p></div>
-<div class="content">
-<p class="greeting">Hi <strong>{req.candidate_name}</strong>,</p>
-<p>Congratulations on passing the sample assessment! We were impressed with your performance, and we're excited to move forward with you.</p>
-<p>It's now time for the <strong>Official Online Assessment</strong>, a critical step that will showcase your true potential. This assessment is designed to evaluate your technical depth, problem-solving approach, and coding proficiency in a comprehensive manner.</p>
-<div class="highlight-box"><p><strong>⏰ Important Deadline</strong></p><p style="margin-top: 8px;">Please complete this assessment within <strong>48 hours</strong> from now. Timely submission is important for us to continue with your application.</p></div>
-<p style="margin-bottom: 12px;"><strong>Assessment Details:</strong></p>
-<ul class="feature-list"><li>Duration: 90 minutes (timed assessment)</li><li>Difficulty: Intermediate to Advanced</li><li>Format: Programming & Problem-Solving</li><li>Attempts: 1 (please prepare well)</li></ul>
-<div class="button-container"><a href="{oa_link}" class="button">Begin Official Assessment →</a></div>
-<p><strong>Important Guidelines:</strong></p>
-<ul style="margin: 12px 0;"><li>Ensure you have a <strong>stable internet connection</strong> before starting</li><li>Choose a <strong>quiet environment</strong> with no distractions</li><li>Have <strong>90 minutes uninterrupted</strong> to complete the test</li><li>Once started, the test <strong>cannot be paused</strong> - plan accordingly</li><li><strong>Do not</strong> use external resources or ask for help during the test</li></ul>
-<p><strong>Why This Assessment Matters:</strong></p>
-<p>This is where you demonstrate your real capabilities. We're looking for candidates who can think critically, solve problems efficiently, and write clean, maintainable code. Your performance on this assessment will directly influence the next stage of our hiring process.</p>
-<p>Believe in yourself, show us what you can do, and let your skills speak! 💪 We're rooting for you!</p>
-<p>Best regards,<br><strong>Engineering Recruitment Team</strong><br><span style="color: #718096; font-size: 14px;">Looking forward to your response</span></p>
-</div><div class="footer"><p>This invitation is unique and confidential. Please do not share the link with anyone.</p></div>
-</div></div></body></html>"""
-    
+
+    oa_link = (
+        req.oa_link
+        or os.getenv("OFFICIAL_OA_LINK")
+        or os.getenv("DEFAULT_OA_LINK")
+        or "https://hackerrank.com/sample-test"
+    )
+    tracked_oa_link = _build_oa_launch_link(oa_link, req.candidate_email, req.candidate_name)
+
     return {
-        "subject": "🚀 Official Assessment Invitation",
-        "body": html_body,
+        "subject": "Official Online Assessment Invitation",
+                "body": f"""
+                <!DOCTYPE html><html><body style="font-family:Arial,sans-serif;color:#333;">
+                <div style="max-width:600px;margin:auto;padding:20px;">
+                    <div style="background:linear-gradient(135deg,#0ea5e9,#2563eb);color:white;padding:26px;border-radius:10px 10px 0 0;text-align:center;">
+                        <h1 style="margin:0;font-size:24px;">Official Online Assessment Invitation</h1>
+                    </div>
+                    <div style="background:#f9fafb;padding:28px;border-radius:0 0 10px 10px;">
+                        <p>Dear <strong>{req.candidate_name}</strong>,</p>
+
+                        <p>You have been invited to take the <strong>official Online Assessment</strong>.</p>
+                        <p>Please complete it within <strong>48 hours</strong>.</p>
+
+                        <p style="text-align:center;margin:24px 0;">
+                            <a href="{tracked_oa_link}" style="display:inline-block;padding:14px 28px;background:#2563eb;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">Start Official OA</a>
+                        </p>
+
+                        <p>If the button does not open, copy and paste this link in your browser:</p>
+                        <p><a href="{tracked_oa_link}">{tracked_oa_link}</a></p>
+
+                        <p style="font-size:12px;color:#666;">Direct official assessment link (fallback): <a href="{oa_link}">{oa_link}</a></p>
+
+                        <p>Best regards,<br><strong>Recruiting Team</strong></p>
+                    </div>
+                </div>
+                </body></html>
+                """,
         "recipient_email": req.candidate_email,
         "recipient_name": req.candidate_name
     }
@@ -130,50 +197,71 @@ body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.7; color: #2d
 def get_resume_shortlisted_email(req: EmailRequest):
     if not req.candidate_email or not req.candidate_name:
         return _skip_response()
+
+    oa_link = (
+        req.oa_link
+        or os.getenv("OFFICIAL_OA_LINK")
+        or os.getenv("DEFAULT_OA_LINK")
+        or "https://hackerrank.com/sample-test"
+    )
+    tracked_oa_link = _build_oa_launch_link(oa_link, req.candidate_email, req.candidate_name)
     
-    oa_link = OA_SAMPLE_LINK  # Sample OA link
-    
-    # Sample OA email template (aligned with provided format)
-    html_body = f"""<!DOCTYPE html>
-<html><head><style>
-body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.7; color: #2d3748; background: #f7fafc; margin: 0; padding: 0; }}
-.wrapper {{ background: #f7fafc; padding: 20px 0; }}
-.container {{ max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }}
-.header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; padding: 40px 30px; text-align: center; }}
-.header h1 {{ margin: 0; font-size: 32px; font-weight: 700; }}
-.header p {{ margin: 8px 0 0 0; opacity: 0.95; font-size: 16px; }}
-.content {{ padding: 40px 30px; }}
-.greeting {{ font-size: 18px; margin: 0 0 20px 0; }}
-.greeting strong {{ color: #667eea; }}
-.highlight-box {{ background: #f0f4ff; border-left: 4px solid #667eea; padding: 15px 20px; margin: 20px 0; border-radius: 6px; }}
-.highlight-box p {{ margin: 0; color: #2d3748; font-size: 15px; }}
-.feature-list {{ list-style: none; padding: 0; margin: 12px 0; }}
-.feature-list li {{ padding: 8px 0; padding-left: 24px; position: relative; color: #4a5568; }}
-.feature-list li:before {{ content: "✓"; position: absolute; left: 0; color: #667eea; font-weight: bold; }}
-.button-container {{ text-align: center; margin: 30px 0; }}
-.button {{ display: inline-block; padding: 14px 36px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff !important; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px; }}
-.footer {{ background: #f7fafc; padding: 20px 30px; text-align: center; border-top: 1px solid #e2e8f0; }}
-.footer p {{ margin: 0; color: #718096; font-size: 13px; }}
-</style></head><body><div class="wrapper"><div class="container">
-<div class="header"><h1>🎉 Congratulations!</h1><p>Your Resume Has Been Shortlisted</p></div>
-<div class="content">
-<p class="greeting">Dear <strong>{req.candidate_name}</strong>,</p>
-<p>We are excited to inform you that your resume has been <strong>shortlisted</strong> for further consideration in our hiring process!</p>
-<p>Your qualifications, skills, and experience align perfectly with the requirements of the position. Your background demonstrates strong potential to contribute meaningfully to our team, and we believe you could be an excellent fit for our organization.</p>
-<div class="highlight-box"><p><strong>🎯 Next Step: Sample Online Assessment</strong></p><p style="margin-top: 8px;">To move forward, we would like you to take a quick sample assessment. This will help us evaluate your technical skills and problem-solving approach in a practical environment.</p></div>
-<p style="margin-bottom: 12px;"><strong>Assessment Overview:</strong></p>
-<ul class="feature-list"><li>Quick sample test to assess your capabilities</li><li>Takes approximately 30-45 minutes</li><li>Can be completed at your convenience</li><li>Valid for 7 days from now</li></ul>
-<div class="button-container"><a href="{oa_link}" class="button">Start Sample Assessment →</a></div>
-<p><strong>What to Expect:</strong></p>
-<p>The assessment focuses on practical problem-solving and coding skills relevant to the role. You'll have one attempt, and the environment will be similar to standard coding platforms you may have used before.</p>
-<p>If you have any questions or face technical difficulties, please don't hesitate to reach out. We're here to help!</p>
-<p>We look forward to seeing your performance. Best of luck! 💪</p>
-<p>Warm regards,<br><strong>Engineering Recruitment Team</strong><br><span style="color: #718096; font-size: 14px;">Committed to finding great talent</span></p>
-</div><div class="footer"><p>This email is confidential and intended only for the recipient.</p></div>
-</div></div></body></html>"""
+    # Professional HTML email template
+    html_body = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+            .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+            .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+            .content {{ background: #f9fafb; padding: 30px; border-radius: 0 0 10px 10px; }}
+            .button {{ display: inline-block; padding: 15px 30px; background: #667eea; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; }}
+            .footer {{ text-align: center; margin-top: 30px; color: #666; font-size: 12px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>🎉 Congratulations!</h1>
+            </div>
+            <div class="content">
+                <p>Dear <strong>{req.candidate_name}</strong>,</p>
+                
+                <p>We are pleased to inform you that your resume has been <strong>shortlisted</strong> for further consideration.</p>
+                
+                <p>Your skills and experience align well with our requirements, and we would like to proceed to the next step of our hiring process.</p>
+                
+                <h3>📋 Next Step: Online Assessment</h3>
+                <p>Please complete the Online Assessment using the link below within <strong>48 hours</strong>:</p>
+                
+                <p style="text-align: center;">
+                    <a href="{tracked_oa_link}" class="button">Take Online Assessment</a>
+                </p>
+                
+                <p><strong>Assessment Details:</strong></p>
+                <ul>
+                    <li>Duration: 60 minutes</li>
+                    <li>Topics: Programming, Problem Solving, Technical Skills</li>
+                    <li>Deadline: Within 48 hours from receipt of this email</li>
+                </ul>
+                
+                <p>We look forward to reviewing your performance!</p>
+                
+                <p>Best regards,<br>
+                <strong>HR Recruiting Team</strong></p>
+            </div>
+            <div class="footer">
+                <p>This is an automated email from our recruitment system.</p>
+                <p>If you have any questions, please reply to this email.</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
     
     return {
-        "subject": "🎉 Congratulations! Your Resume Has Been Shortlisted",
+        "subject": "🎉 Your Resume Has Been Shortlisted!",
         "body": html_body,
         "recipient_email": req.candidate_email,
         "recipient_name": req.candidate_name
@@ -194,76 +282,9 @@ def get_oa_shortlisted_email(req: EmailRequest):
 def get_interview_confirm_email(req: EmailRequest):
     if not req.candidate_email or not req.candidate_name:
         return _skip_response()
-    
-    round_label = req.round_label or "Interview"
-    scheduled_time = req.scheduled_time or "To Be Confirmed"
-    interview_format = req.interview_format or "video call"
-    meeting_link = req.meeting_link or "Will be shared via calendar invitation"
-    
-    meeting_section = (
-        f'<div style="background: #fff; border: 2px solid #48bb78; padding: 20px; border-radius: 8px; margin: 25px 0; text-align: center;">' 
-        f'<p style="margin: 0 0 10px 0; font-size: 14px; color: #2f855a; font-weight: 600; text-transform: uppercase;">Meeting Link</p>'
-        f'<a href="{meeting_link}" style="color: #2f855a; font-weight: 700; text-decoration: none; word-break: break-all; font-size: 15px;">{meeting_link}</a>'
-        f'</div>'
-        if req.meeting_link
-        else '<p style="margin: 25px 0; padding: 20px; background: #f0fff4; border-radius: 8px; text-align: center; color: #2f855a; font-weight: 600;">📧 Meeting link will be shared via calendar invitation</p>'
-    )
-    
-    html_body = f"""<!DOCTYPE html>
-<html><head><style>
-body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.7; color: #2d3748; background: #f7fafc; margin: 0; padding: 0; }}
-.wrapper {{ background: #f7fafc; padding: 20px 0; }}
-.container {{ max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }}
-.header {{ background: linear-gradient(135deg, #48bb78 0%, #38b2ac 100%); color: #ffffff; padding: 40px 30px; text-align: center; }}
-.header h1 {{ margin: 0; font-size: 32px; font-weight: 700; }}
-.header p {{ margin: 8px 0 0 0; opacity: 0.95; font-size: 16px; }}
-.content {{ padding: 40px 30px; }}
-.greeting {{ font-size: 18px; margin: 0 0 20px 0; }}
-.greeting strong {{ color: #38b2ac; }}
-.confirm-box {{ background: #f0fff4; border: 2px solid #48bb78; padding: 20px; margin: 25px 0; border-radius: 8px; text-align: center; }}
-.confirm-box h3 {{ margin: 0 0 10px 0; color: #2f855a; font-size: 22px; }}
-.info-table {{ background: #f7fafc; border-radius: 8px; padding: 20px; margin: 25px 0; }}
-.info-row {{ display: flex; padding: 10px 0; border-bottom: 1px solid #e2e8f0; }}
-.info-row:last-child {{ border-bottom: none; }}
-.info-label {{ width: 140px; color: #718096; font-weight: 600; font-size: 14px; }}
-.info-value {{ color: #2d3748; font-weight: 700; font-size: 14px; }}
-.footer {{ background: #f7fafc; padding: 20px 30px; text-align: center; border-top: 1px solid #e2e8f0; }}
-.footer p {{ margin: 0; color: #718096; font-size: 13px; }}
-</style></head><body><div class="wrapper"><div class="container">
-<div class="header"><h1>✅ Interview Confirmed</h1><p>We're excited to meet you!</p></div>
-<div class="content">
-<p class="greeting">Hi <strong>{req.candidate_name}</strong>,</p>
-<p>Great news! Your interview has been successfully confirmed.</p>
-<div class="confirm-box">
-<h3>✓ All Set!</h3>
-<p style="margin: 10px 0 0 0; font-size: 15px; color: #2f855a;">Your interview slot is confirmed. Details below.</p>
-</div>
-<div class="info-table">
-<div class="info-row"><div class="info-label">Interview Type:</div><div class="info-value">{round_label}</div></div>
-<div class="info-row"><div class="info-label">Format:</div><div class="info-value">{interview_format.title()}</div></div>
-<div class="info-row"><div class="info-label">Scheduled Time:</div><div class="info-value">{scheduled_time}</div></div>
-<div class="info-row"><div class="info-label">Duration:</div><div class="info-value">60 minutes</div></div>
-</div>
-{meeting_section}
-<p style="background: #ebf8ff; border-left: 4px solid #4299e1; padding: 15px; border-radius: 6px; margin: 25px 0;">
-<strong>📅 Calendar Invitation:</strong> A calendar invite with all details has been sent to your email. Please accept it to add this interview to your schedule.
-</p>
-<p><strong>What to Prepare:</strong></p>
-<ul style="padding-left: 20px; margin: 15px 0; color: #4a5568; font-size: 15px;">
-<li style="margin-bottom: 8px;">Review the job description and requirements</li>
-<li style="margin-bottom: 8px;">Prepare examples of your past work and achievements</li>
-<li style="margin-bottom: 8px;">Think of questions you'd like to ask us</li>
-<li style="margin-bottom: 8px;">Test your camera, microphone, and internet connection</li>
-</ul>
-<p>If you need to reschedule, please let us know at least 24 hours in advance by replying to this email.</p>
-<p style="margin-top: 30px;">We look forward to speaking with you!</p>
-<p>Best regards,<br><strong>HR Recruiting Team</strong><br><span style="color: #718096; font-size: 14px;">Building great teams together</span></p>
-</div><div class="footer"><p>This confirmation was sent because an interview was scheduled with you. Questions? Contact your recruiter.</p></div>
-</div></div></body></html>"""
-    
     return {
-        "subject": f"✅ Interview Confirmed: {round_label} - {scheduled_time}",
-        "body": html_body,
+        "subject": "Interview Confirmation",
+        "body": "Dear Candidate,\n\nYour interview has been confirmed. Please check the details in your calendar invitation.\n\nBest,\nRecruiting Team",
         "recipient_email": req.candidate_email,
         "recipient_name": req.candidate_name
     }
@@ -278,68 +299,9 @@ def get_interview_reminder_email(req: EmailRequest):
             "recipient_name": "none",
             "skipped": True
         }
-    
-    round_label = req.round_label or "Interview"
-    scheduled_time = req.scheduled_time or "tomorrow"
-    interview_format = req.interview_format or "video call"
-    
-    html_body = f"""<!DOCTYPE html>
-<html><head><style>
-body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.7; color: #2d3748; background: #f7fafc; margin: 0; padding: 0; }}
-.wrapper {{ background: #f7fafc; padding: 20px 0; }}
-.container {{ max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }}
-.header {{ background: linear-gradient(135deg, #4299e1 0%, #667eea 100%); color: #ffffff; padding: 40px 30px; text-align: center; }}
-.header h1 {{ margin: 0; font-size: 32px; font-weight: 700; }}
-.header p {{ margin: 8px 0 0 0; opacity: 0.95; font-size: 16px; }}
-.content {{ padding: 40px 30px; }}
-.greeting {{ font-size: 18px; margin: 0 0 20px 0; }}
-.greeting strong {{ color: #4299e1; }}
-.reminder-box {{ background: #ebf8ff; border-left: 4px solid #4299e1; padding: 20px; margin: 25px 0; border-radius: 6px; }}
-.reminder-box h3 {{ margin: 0 0 10px 0; color: #2c5282; font-size: 18px; }}
-.info-table {{ background: #f7fafc; border-radius: 8px; padding: 20px; margin: 25px 0; }}
-.info-row {{ display: flex; padding: 10px 0; border-bottom: 1px solid #e2e8f0; }}
-.info-row:last-child {{ border-bottom: none; }}
-.info-label {{ width: 140px; color: #718096; font-weight: 600; font-size: 14px; }}
-.info-value {{ color: #2d3748; font-weight: 700; font-size: 14px; }}
-.checklist {{ list-style: none; padding: 0; margin: 20px 0; }}
-.checklist li {{ padding: 10px 0; padding-left: 28px; position: relative; color: #4a5568; font-size: 15px; }}
-.checklist li:before {{ content: "✓"; position: absolute; left: 0; color: #48bb78; font-weight: bold; font-size: 18px; }}
-.footer {{ background: #f7fafc; padding: 20px 30px; text-align: center; border-top: 1px solid #e2e8f0; }}
-.footer p {{ margin: 0; color: #718096; font-size: 13px; }}
-</style></head><body><div class="wrapper"><div class="container">
-<div class="header"><h1>⏰ Interview Reminder</h1><p>Your interview is coming up soon!</p></div>
-<div class="content">
-<p class="greeting">Hi <strong>{req.candidate_name}</strong>,</p>
-<p>This is a friendly reminder about your upcoming interview with our team.</p>
-<div class="reminder-box">
-<h3>📅 Interview Details</h3>
-<p style="margin: 10px 0 0 0; font-size: 15px;">We're looking forward to speaking with you about the <strong>{round_label}</strong> position.</p>
-</div>
-<div class="info-table">
-<div class="info-row"><div class="info-label">Interview Type:</div><div class="info-value">{round_label}</div></div>
-<div class="info-row"><div class="info-label">Format:</div><div class="info-value">{interview_format.title()}</div></div>
-<div class="info-row"><div class="info-label">Scheduled Time:</div><div class="info-value">{scheduled_time}</div></div>
-<div class="info-row"><div class="info-label">Duration:</div><div class="info-value">60 minutes</div></div>
-</div>
-<p style="margin-top: 25px;"><strong>Quick Checklist Before Your Interview:</strong></p>
-<ul class="checklist">
-<li>Check your internet connection and test your camera/microphone</li>
-<li>Have a quiet, well-lit space ready for the call</li>
-<li>Review the job description and your resume</li>
-<li>Prepare questions you'd like to ask us</li>
-<li>Join the meeting 5 minutes early</li>
-</ul>
-<p style="background: #fffaf0; border-left: 4px solid #ed8936; padding: 15px; border-radius: 6px; margin: 25px 0;">
-<strong>Need to reschedule?</strong> Please let us know at least 24 hours in advance by replying to this email.
-</p>
-<p>We're excited to meet you and learn more about your background and aspirations. If you have any questions, feel free to reach out!</p>
-<p style="margin-top: 30px;">Best regards,<br><strong>HR Recruiting Team</strong><br><span style="color: #718096; font-size: 14px;">We're rooting for you!</span></p>
-</div><div class="footer"><p>This is an automated reminder. Please do not reply to this email if you have questions - contact your recruiter directly.</p></div>
-</div></div></body></html>"""
-    
     return {
-        "subject": f"⏰ Reminder: Your Interview for {round_label} is Coming Up",
-        "body": html_body,
+        "subject": "Interview Reminder",
+        "body": "Dear Candidate,\n\nThis is a reminder for your upcoming interview tomorrow.\n\nBest,\nRecruiting Team",
         "recipient_email": req.candidate_email,
         "recipient_name": req.candidate_name
     }
@@ -350,57 +312,113 @@ def get_interview_invite_email(req: EmailRequest):
         return _skip_response()
 
     round_number = req.round_number or 1
-    round_label = req.round_label or "DSA Round"
+    round_label = req.round_label or "Interview"
     interview_format = req.interview_format or "video call"
-    scheduled_time = req.scheduled_time or "To Be Confirmed"
+    scheduled_time = _format_scheduled_time_for_email(req.scheduled_time, req.timezone)
+    if req.feedback_form_url:
+        base_feedback_url = req.feedback_form_url
+    else:
+        public_base = (os.getenv("PUBLIC_API_BASE_URL") or "http://localhost:8000").rstrip("/")
+        base_feedback_url = f"{public_base}/feedback-form.html"
 
-    meeting_section = (
-        f'<div style="background:#fff;border:1px solid #e2e8f0;padding:15px;border-radius:8px;margin:20px 0;">'
-        f'<p style="margin:0 0 5px 0;font-size:14px;color:#64748b;font-weight:600;">Meeting Link</p>'
-        f'<a href="{req.meeting_link}" style="color:#4f46e5;font-weight:700;text-decoration:none;word-break:break-all;">{req.meeting_link}</a>'
-        f'</div>'
-        if req.meeting_link
-        else '<p style="margin:20px 0;color:#64748b;font-style:italic;">Meeting link will be shared via calendar invitation.</p>'
+    feedback_query = {}
+    if req.interview_id is not None:
+        feedback_query["interview_id"] = req.interview_id
+    if req.candidate_name:
+        feedback_query["candidate"] = req.candidate_name
+    if req.candidate_email:
+        feedback_query["candidate_email"] = req.candidate_email
+    if round_label:
+        feedback_query["job"] = round_label
+
+    feedback_form_url = (
+        f"{base_feedback_url}?{urlencode(feedback_query)}"
+        if feedback_query
+        else base_feedback_url
     )
 
-    html_body = f"""
-    <!DOCTYPE html><html><body style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#333;line-height:1.6;margin:0;padding:0;background-color:#f4f7f9;">
-    <div style="max-width:600px;margin:20px auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 15px rgba(0,0,0,0.05);">
-      <div style="background:linear-gradient(135deg,#6366f1,#a855f7);color:white;padding:50px 30px;text-align:center;">
-        <h1 style="margin:0;font-size:28px;font-weight:800;letter-spacing:-0.5px;">Invitation to Interview!</h1>
-        <p style="margin:10px 0 0 0;opacity:0.9;font-size:18px;font-weight:500;">Round {round_number}: {round_label}</p>
-      </div>
-      <div style="padding:40px 35px;">
-        <p style="font-size:16px;margin-bottom:25px;">Hi <strong>{req.candidate_name}</strong>,</p>
-        <p style="font-size:16px;">We're excited to invite you to the next stage of our recruitment process for the <strong>{round_label}</strong>.</p>
-        
-        <div style="background:#f8fafc;border:1px solid #edf2f7;border-radius:10px;padding:25px;margin:30px 0;">
-          <table style="width:100%;border-collapse:collapse;">
-            <tr><td style="padding:10px 0;color:#64748b;font-weight:600;width:120px;">Format</td><td style="padding:10px 0;color:#1e293b;font-weight:700;">{interview_format.title()}</td></tr>
-            <tr><td style="padding:10px 0;color:#64748b;font-weight:600;">Time</td><td style="padding:10px 0;color:#1e293b;font-weight:700;">{scheduled_time}</td></tr>
-            <tr><td style="padding:10px 0;color:#64748b;font-weight:600;">Duration</td><td style="padding:10px 0;color:#1e293b;font-weight:700;">60 minutes</td></tr>
-          </table>
-        </div>
+    meeting_section = (
+        f'<p><strong>Meeting Link:</strong> <a href="{req.meeting_link}">{req.meeting_link}</a></p>'
+        if req.meeting_link
+        else "<p><strong>Meeting link:</strong> Will be shared via calendar invitation.</p>"
+    )
 
+    slots_html = ""
+    if req.slot_options:
+        items = "".join(
+            f"<li>{_format_scheduled_time_for_email(s, req.timezone)}</li>"
+            for s in req.slot_options
+        )
+        slots_html = f"<p><strong>Available Time Slots (select one):</strong></p><ul>{items}</ul>"
+
+    html_body = f"""
+    <!DOCTYPE html><html><body style="font-family:Arial,sans-serif;color:#333;">
+    <div style="max-width:600px;margin:auto;padding:20px;">
+      <div style="background:linear-gradient(135deg,#667eea,#764ba2);color:white;padding:30px;border-radius:10px 10px 0 0;text-align:center;">
+        <h1>You're Invited to Interview!</h1>
+        <p style="font-size:18px;opacity:0.9;">Round {round_number}: {round_label}</p>
+      </div>
+      <div style="background:#f9fafb;padding:30px;border-radius:0 0 10px 10px;">
+        <p>Dear <strong>{req.candidate_name}</strong>,</p>
+        <p>We are pleased to invite you to <strong>Round {round_number} – {round_label}</strong> of
+           our interview process!</p>
+
+        <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+          <tr style="background:#edf2f7;">
+            <td style="padding:8px 12px;font-weight:bold;">Format</td>
+            <td style="padding:8px 12px;">{interview_format.title()}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:bold;">Confirmed Time</td>
+            <td style="padding:8px 12px;">{scheduled_time}</td>
+          </tr>
+          <tr style="background:#edf2f7;">
+            <td style="padding:8px 12px;font-weight:bold;">Duration</td>
+            <td style="padding:8px 12px;">~60 minutes</td>
+          </tr>
+        </table>
+
+        {slots_html}
         {meeting_section}
 
-        <div style="margin-top:35px;">
-          <h3 style="font-size:16px;color:#1e293b;margin-bottom:12px;">What to Expect</h3>
-          <ul style="padding-left:20px;margin:0;color:#475569;font-size:15px;">
-            <li style="margin-bottom:8px;">Deep dive into your technical background and problem-solving skills.</li>
-            <li style="margin-bottom:8px;">Competency-based questions tailored to the <strong>{round_label}</strong>.</li>
-            <li style="margin-bottom:8px;">A chance to learn more about our team and engineering culture.</li>
-          </ul>
+                <div style="margin:18px 0;padding:14px;background:#eef2ff;border-left:4px solid #4f46e5;border-radius:6px;">
+                    <strong>Interviewer Scorecard:</strong>
+                    Please submit interview feedback after the session.
+                    <br><br>
+                    <a href="{feedback_form_url}" style="display:inline-block;padding:10px 16px;background:#4f46e5;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">
+                        Submit Feedback Scorecard
+                    </a>
+                </div>
+
+        <h3 style="color:#4a5568;">What to Expect</h3>
+        <ul>
+          <li>Discussion of your background and relevant experience</li>
+          <li>Technical / competency-based questions aligned to the role</li>
+          <li>A chance for you to ask questions about the team and company</li>
+        </ul>
+
+        <div style="background:#ebf8ff;border-left:4px solid #4299e1;padding:12px;margin:16px 0;border-radius:4px;">
+          <strong>Need to reschedule?</strong> Please reply to this email at least 24 hours in advance
+          and we will do our best to accommodate you.
         </div>
 
-        <div style="margin-top:40px;padding:20px;background:#fffaf0;border-left:4px solid #ed8936;border-radius:6px;font-size:14px;color:#7b341e;">
-          <strong>Note:</strong> If you need to reschedule, please reply to this email at least 24 hours in advance.
-        </div>
-        
-        <p style="margin-top:45px;font-size:16px;border-top:1px solid #f1f5f9;padding-top:30px;">
-          Best of luck,<br><strong style="color:#4f46e5;">HR Recruiting Team</strong>
-        </p>
+                <div style="margin:20px 0;padding:16px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;text-align:center;">
+                    <p style="margin:0 0 10px 0;"><strong>Post-Interview Action</strong></p>
+                    <p style="margin:0 0 14px 0;">After the interview, please submit the feedback scorecard.</p>
+                    <a href="{feedback_form_url}" style="display:inline-block;padding:12px 20px;background:#059669;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:bold;">
+                        Submit Feedback
+                    </a>
+                    <p style="margin:12px 0 0 0;font-size:12px;color:#4b5563;">
+                        If the button does not open, use this link: <a href="{feedback_form_url}">{feedback_form_url}</a>
+                    </p>
+                </div>
+
+        <p>We look forward to speaking with you!</p>
+        <br><p>Best regards,<br><strong>HR Recruiting Team</strong></p>
       </div>
+      <p style="text-align:center;font-size:12px;color:#888;margin-top:20px;">
+        This is an automated email from our recruitment system.
+      </p>
     </div>
     </body></html>
     """
@@ -422,6 +440,7 @@ class InterviewerKitRequest(BaseModel):
     candidate_email: str
     scheduled_time: Optional[str] = None
     round_label: Optional[str] = "Interview"
+    meeting_link: Optional[str] = None
     feedback_form_url: Optional[str] = None
     resume_summary: Optional[str] = None
     job_description: Optional[str] = None
@@ -435,53 +454,73 @@ class InterviewerKitResponse(BaseModel):
 @router.post("/interviewer-kit", response_model=InterviewerKitResponse)
 def get_interviewer_kit_email(req: InterviewerKitRequest):
     """Return the pre-interview kit email body for an interviewer."""
+    pretty_scheduled_time = _format_scheduled_time_for_email(req.scheduled_time)
     feedback_url = req.feedback_form_url or "http://localhost:8000/feedback-form.html"
     jd_section = (
-        f'<div style="margin-bottom:25px;"><h3 style="font-size:16px;color:#1e293b;border-bottom:2px solid #f1f5f9;padding-bottom:10px;">Job Context</h3><p style="font-size:14px;color:#475569;">{req.job_description[:600]}...</p></div>'
+        f"<h3>Job Description</h3><p>{req.job_description[:600]}...</p>"
         if req.job_description else ""
     )
     resume_section = (
-        f'<div style="margin-bottom:25px;"><h3 style="font-size:16px;color:#1e293b;border-bottom:2px solid #f1f5f9;padding-bottom:10px;">Resume Highlights</h3><p style="font-size:14px;color:#475569;">{req.resume_summary[:500]}...</p></div>'
+        f"<h3>Candidate Resume Summary</h3><p>{req.resume_summary[:500]}...</p>"
         if req.resume_summary else ""
     )
 
     html_body = f"""
-    <!DOCTYPE html><html><body style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#333;line-height:1.6;background-color:#f8fafc;">
-    <div style="max-width:600px;margin:20px auto;background:#fff;border-radius:12px;overflow:hidden;border:1px solid #e1e4e8;">
-      <div style="background:#1e293b;color:white;padding:35px 30px;">
-        <p style="margin:0;font-size:12px;text-transform:uppercase;font-weight:700;letter-spacing:1px;opacity:0.7;">Interview Preparation</p>
-        <h2 style="margin:5px 0 0 0;font-size:24px;font-weight:800;">Interview Kit: {req.candidate_name}</h2>
+    <!DOCTYPE html><html><body style="font-family:Arial,sans-serif;color:#333;">
+    <div style="max-width:600px;margin:auto;padding:20px;">
+      <div style="background:#1a202c;color:white;padding:25px;border-radius:10px 10px 0 0;">
+        <h2>🎯 Interview Kit – {req.round_label}</h2>
       </div>
-      <div style="padding:35px;">
-        <p style="font-size:16px;">Hi <strong>{req.interviewer_name}</strong>,</p>
-        <p style="font-size:16px;">You have a <strong>{req.round_label}</strong> scheduled. Below are the candidate details and evaluation tools.</p>
-        
-        <div style="background:#f1f5f9;border-radius:10px;padding:25px;margin:25px 0;">
-          <table style="width:100%;border-collapse:collapse;">
-            <tr><td style="padding:8px 0;color:#64748b;font-weight:600;width:140px;">Candidate</td><td style="padding:8px 0;color:#1e293b;font-weight:700;">{req.candidate_name}</td></tr>
-            <tr><td style="padding:8px 0;color:#64748b;font-weight:600;">Round</td><td style="padding:8px 0;color:#1e293b;font-weight:700;">{req.round_label}</td></tr>
-            <tr><td style="padding:8px 0;color:#64748b;font-weight:600;">Time</td><td style="padding:8px 0;color:#1e293b;font-weight:700;">{req.scheduled_time or 'See calendar'}</td></tr>
-          </table>
-        </div>
+      <div style="background:#f9fafb;padding:25px;border-radius:0 0 10px 10px;">
+        <p>Hi <strong>{req.interviewer_name}</strong>,</p>
+        <p>You have an upcoming interview. Here are the full details:</p>
+
+        <table style="width:100%;border-collapse:collapse;margin:12px 0;">
+          <tr style="background:#edf2f7;">
+            <td style="padding:8px 12px;font-weight:bold;">Candidate</td>
+            <td style="padding:8px 12px;">{req.candidate_name} ({req.candidate_email})</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:bold;">Round</td>
+            <td style="padding:8px 12px;">{req.round_label}</td>
+          </tr>
+          <tr style="background:#edf2f7;">
+            <td style="padding:8px 12px;font-weight:bold;">Scheduled Time</td>
+                        <td style="padding:8px 12px;">{pretty_scheduled_time or 'See calendar invite'}</td>
+          </tr>
+                    <tr>
+                        <td style="padding:8px 12px;font-weight:bold;">Meeting Link</td>
+                        <td style="padding:8px 12px;">
+                            {'<a href="' + req.meeting_link + '">' + req.meeting_link + '</a>' if req.meeting_link else 'Check calendar invite'}
+                        </td>
+                    </tr>
+        </table>
 
         {jd_section}
         {resume_section}
 
-        <div style="margin-bottom:30px;">
-          <h3 style="font-size:16px;color:#1e293b;border-bottom:2px solid #f1f5f9;padding-bottom:10px;">Evaluation Focus</h3>
-          <ul style="padding-left:20px;margin:0;color:#475569;font-size:14px;">
-            <li style="margin-bottom:8px;">Deep technical proficiency in relevant domains.</li>
-            <li style="margin-bottom:8px;">Problem-solving approach and critical thinking.</li>
-            <li style="margin-bottom:8px;">Cultural alignment and communication clarity.</li>
-          </ul>
-        </div>
+        <h3>Suggested Interview Questions</h3>
+        <ol>
+          <li>Walk me through your most relevant project or achievement.</li>
+          <li>Describe a challenging problem you solved – what was your approach?</li>
+          <li>How do you prioritise tasks when you have competing deadlines?</li>
+          <li>Give an example of constructive feedback you received and how you responded.</li>
+          <li>What questions do you have for us about the team / role?</li>
+        </ol>
 
-        <div style="text-align:center;margin-top:40px;padding:35px;background:#eef2ff;border-radius:12px;border:1px dashed #6366f1;">
-          <p style="margin:0 0 20px 0;font-weight:600;color:#4338ca;">Submit your scorecard immediately after the session.</p>
-          <a href="{feedback_url}" style="display:inline-block;padding:16px 32px;background:#4f46e5;color:white;border-radius:8px;text-decoration:none;font-weight:700;box-shadow:0 10px 15px -3px rgba(79,70,229,0.3);">Launch Evaluation Form</a>
-        </div>
+        <h3>Competency Scorecard</h3>
+        <p>Please rate the candidate on: Technical Skills, Communication, Problem-Solving,
+           Culture Fit and provide an overall recommendation.</p>
+        <p>
+          <a href="{feedback_url}"
+             style="display:inline-block;padding:12px 28px;background:#667eea;color:white;
+                    border-radius:5px;text-decoration:none;font-weight:bold;">
+            Submit Feedback Scorecard
+          </a>
+        </p>
+        <p style="color:#e53e3e;font-size:13px;">⚠ Please submit within 24 hours of the interview.</p>
 
-        <p style="margin-top:45px;font-size:15px;color:#64748b;text-align:center;">Best regards,<br><strong>HR Coordination Team</strong></p>
+        <br><p>Best regards,<br><strong>HR Coordination Team</strong></p>
       </div>
     </div>
     </body></html>
@@ -494,46 +533,48 @@ def get_interviewer_kit_email(req: InterviewerKitRequest):
         "recipient_name": req.interviewer_name,
     }
 
-@router.post("/hr-reminder", response_model=EmailResponse)
-def get_hr_reminder_email(req: EmailRequest):
-    """Specific reminder for HR/Interviewer about an upcoming interview."""
+
+# ── Rejection email ──────────────────────────────────────────────────────────
+
+@router.post("/rejection", response_model=EmailResponse)
+def get_rejection_email(req: EmailRequest):
     if not req.candidate_email or not req.candidate_name:
         return _skip_response()
-    
-    time_label = "in 1 hour" if "1h" in (req.round_label or "") else "tomorrow"
-    subject = f"Friendly Reminder: Interview with {req.candidate_name} {time_label}"
-    
-    html_body = f"""
-    <!DOCTYPE html><html><body style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#333;line-height:1.6;">
-    <div style="max-width:600px;margin:auto;padding:25px;border:1px solid #e2e8f0;border-radius:12px;background-color:#ffffff;">
-      <h2 style="color:#1e293b;margin-top:0;">⏰ Interview Reminder</h2>
-      <p style="font-size:16px;">Hi Team,</p>
-      <p style="font-size:16px;">This is a reminder that you have an interview with <strong>{req.candidate_name}</strong> scheduled <strong>{time_label}</strong>.</p>
-      
-      <div style="background:#f8fafc;padding:20px;border-radius:8px;margin:20px 0;">
-        <table style="width:100%;">
-          <tr><td style="color:#64748b;font-weight:600;width:120px;">Candidate</td><td style="font-weight:700;">{req.candidate_name}</td></tr>
-          <tr><td style="color:#64748b;font-weight:600;">Time</td><td style="font-weight:700;">{req.scheduled_time}</td></tr>
-          <tr><td style="color:#64748b;font-weight:600;">Position</td><td style="font-weight:700;">{req.round_label}</td></tr>
-        </table>
-      </div>
 
-      <p style="font-size:15px;color:#475569;">Please ensure you have the interview kit ready and the meeting link working.</p>
-      
-      <p style="margin-top:25px;font-size:14px;color:#94a3b8;border-top:1px solid #f1f5f9;padding-top:15px;">
-        Auto-generated by Recruitment Agent.
+    html_body = f"""
+    <!DOCTYPE html><html><body style="font-family:Arial,sans-serif;color:#333;">
+    <div style="max-width:600px;margin:auto;padding:20px;">
+      <div style="background:#4a5568;color:white;padding:25px;border-radius:10px 10px 0 0;text-align:center;">
+        <h2>Application Status Update</h2>
+      </div>
+      <div style="background:#f9fafb;padding:25px;border-radius:0 0 10px 10px;">
+        <p>Dear <strong>{req.candidate_name}</strong>,</p>
+        <p>Thank you sincerely for your time and interest in joining our team. We genuinely enjoyed
+           learning more about your experience throughout the interview process.</p>
+        <p>After careful deliberation, we have made the difficult decision to move forward with
+           another candidate whose background more closely aligns with the specific requirements
+           of this role at this time.</p>
+        <p>Please know that this decision is in no way a reflection of your abilities. We will keep
+           your profile on file and encourage you to apply for future openings that suit your skills.</p>
+        <p>We wish you every success in your job search and career.</p>
+        <br><p>Warm regards,<br><strong>HR Recruiting Team</strong></p>
+      </div>
+      <p style="text-align:center;font-size:12px;color:#888;margin-top:20px;">
+        This is an automated email. If you have questions, please contact hr@company.com.
       </p>
     </div>
     </body></html>
     """
-    
+
     return {
-        "subject": subject,
+        "subject": "Your Application Status – Thank You for Interviewing",
         "body": html_body,
         "recipient_email": req.candidate_email,
         "recipient_name": req.candidate_name,
     }
 
+
+# ── Next-round advancement email ─────────────────────────────────────────────
 
 class NextRoundRequest(BaseModel):
     candidate_email: Optional[str] = None
@@ -779,54 +820,252 @@ def get_onboarding_welcome_email(req: EmailRequest):
         "recipient_email": req.candidate_email,
         "recipient_name": req.candidate_name
     }
+
+# ── OA Completion Thank You Email ────────────────────────────────────────────
+
+class OACompletionRequest(BaseModel):
+    candidate_email: Optional[str] = None
+    candidate_name: Optional[str] = None
+    oa_score: Optional[float] = None
+    report_url: Optional[str] = None
+
+@router.post("/oa-completion-thank-you", response_model=EmailResponse)
+def get_oa_completion_thank_you_email(req: OACompletionRequest):
+    """Send thank you email after OA completion with score and next steps."""
+    if not req.candidate_email or not req.candidate_name:
+        return _skip_response()
+
+    score = float(req.oa_score or 0)
+    score_text = f"{score:.2f}".rstrip("0").rstrip(".")
+    score_color = "#48bb78" if score >= 6 else "#ed8936"
+    score_message = "Congratulations! You have passed the assessment." if score >= 6 else "Thank you for your effort. Our team will review your performance."
+
+    report_section = (
+        f'<p style="text-align: center; margin: 24px 0;"><a href="{req.report_url}" '
+        f'style="display:inline-block;padding:12px 28px;background:#667eea;color:white;'
+        f'border-radius:6px;text-decoration:none;font-weight:bold;">View Your Assessment Report</a></p>'
+        if req.report_url
+        else ""
+    )
+
+    html_body = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; }}
+            .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+            .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 40px; text-align: center; border-radius: 10px 10px 0 0; }}
+            .content {{ background: #f9fafb; padding: 40px; border-radius: 0 0 10px 10px; }}
+            .score-box {{ background: white; border: 3px solid {score_color}; border-radius: 8px; padding: 24px; text-align: center; margin: 24px 0; }}
+            .score-value {{ font-size: 48px; color: {score_color}; font-weight: bold; margin: 8px 0; }}
+            .score-label {{ font-size: 14px; color: #666; margin: 4px 0; }}
+            .next-steps {{ background: #ebf8ff; border-left: 4px solid #667eea; padding: 16px; border-radius: 4px; margin: 20px 0; }}
+            .next-steps strong {{ color: #667eea; }}
+            .footer {{ text-align: center; margin-top: 30px; color: #666; font-size: 12px; border-top: 1px solid #ddd; padding-top: 20px; }}
+            ul {{ margin: 12px 0; padding-left: 24px; }}
+            li {{ margin: 10px 0; }}
+            .header h1 {{ margin: 0; font-size: 28px; }}
+            .header p {{ margin: 8px 0 0 0; opacity: 0.95; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>🎉 Thank You!</h1>
+                <p>Your Online Assessment is Complete</p>
+            </div>
+            <div class="content">
+                <p>Dear <strong>{req.candidate_name}</strong>,</p>
+                
+                <p>Thank you for completing the Online Assessment. We appreciate your time, effort, and commitment to our recruitment process.</p>
+                
+                <div class="score-box">
+                    <div class="score-label">Your Score</div>
+                    <div class="score-value">{score_text}/10</div>
+                </div>
+                
+                <p><strong>{score_message}</strong></p>
+                
+                <p>Your response has been recorded and our recruiting team will thoroughly review your performance. 
+                We evaluate candidates based on multiple factors including technical skills, problem-solving approach, and code quality.</p>
+                
+                {report_section}
+                
+                <div class="next-steps">
+                    <strong>📋 What Happens Next?</strong>
+                    <ul>
+                        <li>Our team will carefully review your assessment results and coding solutions</li>
+                        <li>If you move to the next round, you will be notified within <strong>3-5 business days</strong></li>
+                        <li>Please keep an eye on your email for further updates and opportunities</li>
+                        <li>We typically send updates on weekdays between 9 AM - 6 PM</li>
+                    </ul>
+                </div>
+                
+                <p><strong>💡 Please Note:</strong> Keep this email and your score for your records. You can access your detailed assessment report at any time using the link above.</p>
+                
+                <p>If you have any questions, concerns, or feedback about the assessment process, please don't hesitate to reach out to our recruiting team. We'd love to hear from you.</p>
+                
+                <p>We wish you the very best in the recruitment process and look forward to potentially working with you!</p>
+                
+                <br><p>Warm regards,<br>
+                <strong>HR Recruiting Team</strong></p>
+            </div>
+            <div class="footer">
+                <p>This is an automated email from our recruitment system.</p>
+                <p>If you believe this was sent in error, please contact us immediately.</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    return {
+        "subject": f"Thank You for Completing Your Assessment – Your Score: {score_text}/10",
+        "body": html_body,
+        "recipient_email": req.candidate_email,
+        "recipient_name": req.candidate_name
+    }
+
 class SendEmailRequest(BaseModel):
     recipient_email: str
     recipient_name: str
     subject: str
     body: str
+    is_html: Optional[bool] = None
 
 class SendEmailResponse(BaseModel):
     success: bool
     message: str
     recipient_email: str
 
+
+def _send_email_via_brevo(
+    recipient_email: str,
+    recipient_name: str,
+    subject: str,
+    body: str,
+    is_html: bool,
+    sender_email: str,
+    sender_name: str,
+    brevo_api_key: str,
+) -> Tuple[bool, str]:
+    if not brevo_api_key:
+        return False, "Brevo API key is missing"
+    if not sender_email:
+        return False, "Sender email is required for Brevo delivery"
+
+    payload = {
+        "sender": {"name": sender_name, "email": sender_email},
+        "to": [{"email": recipient_email, "name": recipient_name}],
+        "subject": subject,
+    }
+    if is_html:
+        payload["htmlContent"] = body
+    else:
+        payload["textContent"] = body
+
+    try:
+        response = requests.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={
+                "accept": "application/json",
+                "content-type": "application/json",
+                "api-key": brevo_api_key,
+            },
+            json=payload,
+            timeout=20,
+        )
+        if 200 <= response.status_code < 300:
+            return True, "Email sent successfully via Brevo"
+        return False, f"Brevo send failed ({response.status_code}): {response.text[:300]}"
+    except Exception as exc:
+        return False, f"Brevo send failed: {str(exc)}"
+
+
+def send_email_via_smtp(
+    recipient_email: str,
+    recipient_name: str,
+    subject: str,
+    body: str,
+    is_html: bool = False,
+) -> Tuple[bool, str]:
+    """Send an email via configured SMTP server. Returns (success, message)."""
+    smtp_config = get_smtp_config()
+    sender_email = smtp_config.get("sender_email", "")
+    sender_password = smtp_config.get("sender_password", "")
+    sender_name = smtp_config.get("sender_name", "HR Recruitment Team")
+    brevo_api_key = os.getenv("BREVO_API_KEY") or smtp_config.get("brevo_api_key", "")
+
+    if not sender_email:
+        sender_email = os.getenv("BREVO_SENDER_EMAIL", "")
+
+    if not sender_email or not sender_password:
+        if brevo_api_key:
+            return _send_email_via_brevo(
+                recipient_email=recipient_email,
+                recipient_name=recipient_name,
+                subject=subject,
+                body=body,
+                is_html=is_html,
+                sender_email=sender_email,
+                sender_name=sender_name,
+                brevo_api_key=brevo_api_key,
+            )
+        return False, (
+            "SMTP credentials are not configured in secrets.toml "
+            "(email.sender_email + email.sender_password) and Brevo API fallback is unavailable"
+        )
+
+    msg = MIMEMultipart("alternative")
+    msg["From"] = f"{sender_name} <{sender_email}>"
+    msg["To"] = recipient_email
+    msg["Subject"] = subject
+
+    subtype = "html" if is_html else "plain"
+    msg.attach(MIMEText(body, subtype, "utf-8"))
+
+    try:
+        server = smtplib.SMTP(
+            smtp_config.get("smtp_server", "smtp.gmail.com"),
+            int(smtp_config.get("smtp_port", 587)),
+        )
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.send_message(msg)
+        server.quit()
+        return True, "Email sent successfully"
+    except Exception as smtp_error:
+        if brevo_api_key:
+            return _send_email_via_brevo(
+                recipient_email=recipient_email,
+                recipient_name=recipient_name,
+                subject=subject,
+                body=body,
+                is_html=is_html,
+                sender_email=sender_email,
+                sender_name=sender_name,
+                brevo_api_key=brevo_api_key,
+            )
+        return False, f"Failed to send email: {str(smtp_error)}"
+
 @router.post("/send", response_model=SendEmailResponse)
 def send_email(req: SendEmailRequest):
     """Actually send an email using SMTP"""
     try:
-        smtp_config = get_smtp_config()
-        
-        # Create message
-        msg = MIMEMultipart()
-        msg['From'] = f"HR Recruitment Team <{smtp_config.get('sender_email', 'noreply@example.com')}>"
-        msg['To'] = req.recipient_email
-        msg['Subject'] = req.subject
-        
-        # Add body
-        msg.attach(MIMEText(req.body, 'plain'))
-        
-        # Send email
-        try:
-            server = smtplib.SMTP(smtp_config.get('smtp_server', 'smtp.gmail.com'), 
-                                 smtp_config.get('smtp_port', 587))
-            server.starttls()
-            server.login(smtp_config.get('sender_email', ''), 
-                        smtp_config.get('sender_password', ''))
-            server.send_message(msg)
-            server.quit()
-            
-            return {
-                "success": True,
-                "message": "Email sent successfully",
-                "recipient_email": req.recipient_email
-            }
-        except Exception as smtp_error:
-            # Log but don't fail - email sending is optional
-            print(f"SMTP Error: {str(smtp_error)}")
-            return {
-                "success": False,
-                "message": f"Failed to send email: {str(smtp_error)}",
-                "recipient_email": req.recipient_email
-            }
+        html_detected = "<html" in req.body.lower() and "</html>" in req.body.lower()
+        is_html = req.is_html if req.is_html is not None else html_detected
+        success, message = send_email_via_smtp(
+            recipient_email=req.recipient_email,
+            recipient_name=req.recipient_name,
+            subject=req.subject,
+            body=req.body,
+            is_html=is_html,
+        )
+        return {
+            "success": success,
+            "message": message,
+            "recipient_email": req.recipient_email,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Email error: {str(e)}")

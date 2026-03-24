@@ -8,9 +8,14 @@ import Landing from './components/Landing'
 
 function AppContent() {
   const { isAuthenticated, user } = useAuth()
+  const oauthHash = typeof window !== 'undefined' ? window.location.hash || '' : ''
+  const hasGoogleOauthCallback = oauthHash.includes('access_token=') || oauthHash.includes('error=')
 
   // Show public landing page at root path regardless of auth state
   if (typeof window !== 'undefined' && window.location.pathname === '/') {
+    if (hasGoogleOauthCallback) {
+      return <Login />
+    }
     return <Landing />
   }
 

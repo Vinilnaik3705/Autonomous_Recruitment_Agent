@@ -1,4 +1,116 @@
+import os
+from pathlib import Path
 from backend.database import get_db_connection
+
+
+def _run_sql_migrations(cur):
+    """Apply SQL files in backend/migrations once, tracked in schema_migrations."""
+    migrations_dir = Path(__file__).resolve().parent / "migrations"
+    if not migrations_dir.exists():
+        return
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            filename VARCHAR(255) PRIMARY KEY,
+            applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    for migration_file in sorted(migrations_dir.glob("*.sql")):
+        migration_name = migration_file.name
+        cur.execute(
+            "SELECT 1 FROM schema_migrations WHERE filename = %s",
+            (migration_name,),
+        )
+        if cur.fetchone():
+            continue
+
+        sql_text = migration_file.read_text(encoding="utf-8")
+        savepoint_name = f"mig_{migration_name.replace('.', '_').replace('-', '_')}"
+        cur.execute(f"SAVEPOINT {savepoint_name}")
+        try:
+            cur.execute(sql_text)
+            cur.execute(
+                "INSERT INTO schema_migrations (filename) VALUES (%s)",
+                (migration_name,),
+            )
+            print(f"Applied migration: {migration_name}")
+        except Exception as migration_error:
+            # Keep startup resilient on long-lived instances with partially diverged schemas.
+            cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+            print(f"Skipping migration {migration_name}: {migration_error}")
+        finally:
+            cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+
+
+def _apply_schema_hotfixes(cur):
+    """Patch legacy schemas used by existing n8n workflows without destructive changes."""
+    cur.execute(
+        """
+        ALTER TABLE resume_data
+            ADD COLUMN IF NOT EXISTS email_sent BOOLEAN DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS official_oa_sent BOOLEAN DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS sample_oa_sent BOOLEAN DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS sample_oa_sent_at TIMESTAMP,
+            ADD COLUMN IF NOT EXISTS oa_score DOUBLE PRECISION,
+            ADD COLUMN IF NOT EXISTS oa_status VARCHAR(50) DEFAULT 'uninvited',
+            ADD COLUMN IF NOT EXISTS oa_report_url TEXT,
+            ADD COLUMN IF NOT EXISTS oa_completed_at TIMESTAMP,
+            ADD COLUMN IF NOT EXISTS final_decision VARCHAR(50),
+            ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        """
+    )
+
+    cur.execute(
+        """
+        UPDATE resume_data
+        SET email_sent = FALSE
+        WHERE email_sent IS NULL
+        """
+    )
+
+    cur.execute(
+        """
+        UPDATE resume_data
+        SET official_oa_sent = FALSE
+        WHERE official_oa_sent IS NULL
+        """
+    )
+
+    cur.execute(
+        """
+        UPDATE resume_data
+        SET sample_oa_sent = FALSE
+        WHERE sample_oa_sent IS NULL
+        """
+    )
+
+    # n8n uses ON CONFLICT(candidate_email, scheduled_time); ensure matching unique constraint exists.
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conname = 'unique_candidate_schedule'
+            ) THEN
+                ALTER TABLE interview_schedules
+                    ADD CONSTRAINT unique_candidate_schedule
+                    UNIQUE (candidate_email, scheduled_time);
+            END IF;
+        END $$;
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_resume_data_sample_oa_window
+        ON resume_data(sample_oa_sent, official_oa_sent, sample_oa_sent_at)
+        """
+    )
 
 def init_db():
     conn = get_db_connection()
@@ -29,27 +141,6 @@ def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-
-            # Ensure created_at exists for older tables
-            cur.execute("""
-                ALTER TABLE job_descriptions
-                ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-            """)
-
-            # Readable view for easier inspection in psql
-            cur.execute("""
-                CREATE OR REPLACE VIEW job_descriptions_readable AS
-                SELECT
-                    job_id,
-                    title,
-                    regexp_replace(description, '\\s+', ' ', 'g') AS description,
-                    regexp_replace(required_skills, '\\s+', ' ', 'g') AS required_skills,
-                    min_experience,
-                    max_experience,
-                    created_at
-                FROM job_descriptions
-                ORDER BY created_at DESC;
-            """)
             
             # Interviewers
             cur.execute("""
@@ -74,35 +165,10 @@ def init_db():
                     filename VARCHAR(255) NOT NULL,
                     file_size INTEGER,
                     file_type VARCHAR(20),
-                    file_hash VARCHAR(64),
                     processed BOOLEAN DEFAULT FALSE,
                     upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     session_id VARCHAR(50)
                 )
-            """)
-
-            # Add file_hash column for existing tables
-            cur.execute("""
-                ALTER TABLE resume_files
-                ADD COLUMN IF NOT EXISTS file_hash VARCHAR(64);
-            """)
-
-            # Remove duplicate resume_files entries per session (keep most recent)
-            cur.execute("""
-                DELETE FROM resume_files
-                WHERE id NOT IN (
-                    SELECT DISTINCT ON (session_id, file_hash) id
-                    FROM resume_files
-                    WHERE file_hash IS NOT NULL
-                    ORDER BY session_id, file_hash, upload_date DESC
-                );
-            """)
-
-            # Enforce uniqueness on (session_id, file_hash) to prevent duplicates
-            cur.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS resume_files_session_file_hash_uniq
-                ON resume_files (session_id, file_hash)
-                WHERE file_hash IS NOT NULL;
             """)
 
             # Resume Data (parsed resume content)
@@ -120,73 +186,9 @@ def init_db():
                     ai_score FLOAT DEFAULT 0,
                     ai_summary TEXT,
                     interview_status VARCHAR(50) DEFAULT 'NEW',
-                    email_sent BOOLEAN DEFAULT FALSE,
-                    sample_oa_sent BOOLEAN DEFAULT FALSE,
-                    sample_oa_sent_at TIMESTAMP,
-                    official_oa_sent BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(job_id, email)
                 )
-            """)
-
-            # Add OA tracking columns for existing tables
-            cur.execute("""
-                ALTER TABLE resume_data
-                ADD COLUMN IF NOT EXISTS email_sent BOOLEAN DEFAULT FALSE;
-            """)
-            
-            cur.execute("""
-                ALTER TABLE resume_data
-                ADD COLUMN IF NOT EXISTS sample_oa_sent BOOLEAN DEFAULT FALSE;
-            """)
-            
-            cur.execute("""
-                ALTER TABLE resume_data
-                ADD COLUMN IF NOT EXISTS sample_oa_sent_at TIMESTAMP;
-            """)
-            
-            cur.execute("""
-                ALTER TABLE resume_data
-                ADD COLUMN IF NOT EXISTS official_oa_sent BOOLEAN DEFAULT FALSE;
-            """)
-
-            # Drop existing constraints with any name pattern
-            cur.execute("""
-                DO $$
-                BEGIN
-                    BEGIN
-                        ALTER TABLE resume_data DROP CONSTRAINT resume_data_job_id_email_key CASCADE;
-                    EXCEPTION WHEN UNDEFINED_OBJECT THEN
-                        NULL;
-                    END;
-                    
-                    BEGIN
-                        ALTER TABLE resume_data DROP CONSTRAINT resume_data_job_id_email_unique CASCADE;
-                    EXCEPTION WHEN UNDEFINED_OBJECT THEN
-                        NULL;
-                    END;
-                    
-                    BEGIN
-                        ALTER TABLE resume_data DROP CONSTRAINT resume_data_job_id_email CASCADE;
-                    EXCEPTION WHEN UNDEFINED_OBJECT THEN
-                        NULL;
-                    END;
-                END $$;
-            """)
-
-            # Remove duplicate resume_data entries (keep the one with highest ai_score and latest created_at)
-            cur.execute("""
-                DELETE FROM resume_data 
-                WHERE id NOT IN (
-                    SELECT DISTINCT ON (job_id, email) id 
-                    FROM resume_data 
-                    ORDER BY job_id, email, ai_score DESC, created_at DESC
-                );
-            """)
-
-            # Re-add the UNIQUE constraint to prevent future duplicates
-            cur.execute("""
-                ALTER TABLE resume_data
-                ADD CONSTRAINT resume_data_job_id_email_unique UNIQUE (job_id, email);
             """)
 
             # Candidates (workflow tracking - OA, reminders, shortlisting)
@@ -221,12 +223,43 @@ def init_db():
                     scheduled_time TIMESTAMP,
                     duration_minutes INTEGER DEFAULT 30,
                     meeting_link TEXT,
+                    round_number INTEGER DEFAULT 1,
+                    round_label VARCHAR(100) DEFAULT 'Interview',
+                    interview_format VARCHAR(50) DEFAULT 'video call',
                     status VARCHAR(20) DEFAULT 'scheduled',
                     google_event_id VARCHAR(255),
+                    reminder_24h_sent BOOLEAN DEFAULT FALSE,
+                    reminder_1h_sent BOOLEAN DEFAULT FALSE,
+                    reminder_24h_sent_at TIMESTAMP,
+                    reminder_1h_sent_at TIMESTAMP,
                     feedback_submitted BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
+            """)
+
+            # Backward compatibility for existing databases that were created
+            # before reminder and round tracking columns were added.
+            cur.execute("""
+                ALTER TABLE interview_schedules
+                    ADD COLUMN IF NOT EXISTS round_number INTEGER DEFAULT 1,
+                    ADD COLUMN IF NOT EXISTS round_label VARCHAR(100) DEFAULT 'Interview',
+                    ADD COLUMN IF NOT EXISTS interview_format VARCHAR(50) DEFAULT 'video call',
+                    ADD COLUMN IF NOT EXISTS reminder_24h_sent BOOLEAN DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS reminder_1h_sent BOOLEAN DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS reminder_24h_sent_at TIMESTAMP,
+                    ADD COLUMN IF NOT EXISTS reminder_1h_sent_at TIMESTAMP
+            """)
+
+            cur.execute("""
+                UPDATE interview_schedules
+                SET reminder_24h_sent = FALSE
+                WHERE reminder_24h_sent IS NULL
+            """)
+            cur.execute("""
+                UPDATE interview_schedules
+                SET reminder_1h_sent = FALSE
+                WHERE reminder_1h_sent IS NULL
             """)
             
             # Create index for faster duplicate checking
@@ -274,30 +307,38 @@ def init_db():
                 ON CONFLICT (email) DO NOTHING
             """)
 
-            # Insert demo users for testing RBAC
-            from hashlib import sha256
-            def hash_pwd(pwd):
-                return sha256(pwd.encode()).hexdigest()
-            
-            demo_users = [
-                ('admin', 'admin@example.com', hash_pwd('password'), 'super_admin'),
-                ('recruiter', 'recruiter@example.com', hash_pwd('password'), 'recruiter'),
-                ('interviewer', 'interviewer@example.com', hash_pwd('password'), 'interviewer'),
-                ('john.smith', 'john.smith@company.com', hash_pwd('password'), 'recruiter'),
-            ]
-            
-            for username, email, pwd_hash, role in demo_users:
-                cur.execute(
-                    """
-                    INSERT INTO users (username, email, password_hash, role, is_active)
-                    VALUES (%s, %s, %s, %s, TRUE)
-                    ON CONFLICT (email) DO NOTHING
-                    """,
-                    (username, email, pwd_hash, role)
-                )
+            # Insert demo users only when explicitly enabled.
+            enable_demo_users = os.getenv('ENABLE_DEMO_USERS', 'false').lower() in ('1', 'true', 'yes', 'on')
+            if enable_demo_users:
+                from hashlib import sha256
+
+                def hash_pwd(pwd):
+                    return sha256(pwd.encode()).hexdigest()
+
+                demo_users = [
+                    ('admin', 'admin@example.com', hash_pwd('password'), 'super_admin'),
+                    ('recruiter', 'recruiter@example.com', hash_pwd('password'), 'recruiter'),
+                    ('interviewer', 'interviewer@example.com', hash_pwd('password'), 'interviewer'),
+                    ('john.smith', 'john.smith@company.com', hash_pwd('password'), 'recruiter'),
+                ]
+
+                for username, email, pwd_hash, role in demo_users:
+                    cur.execute(
+                        """
+                        INSERT INTO users (username, email, password_hash, role, is_active)
+                        VALUES (%s, %s, %s, %s, TRUE)
+                        ON CONFLICT (email) DO NOTHING
+                        """,
+                        (username, email, pwd_hash, role)
+                    )
+
+            # Apply migration scripts and hotfixes on every startup in a safe/idempotent way.
+            _run_sql_migrations(cur)
+            _apply_schema_hotfixes(cur)
 
             print("Database initialized successfully with unified schema!")
-            print("✓ Demo users created for testing (admin@example.com, recruiter@example.com, interviewer@example.com)")
+            if enable_demo_users:
+                print("✓ Demo users created for testing (admin@example.com, recruiter@example.com, interviewer@example.com)")
             conn.commit()
     except Exception as e:
         print(f"Error initializing database: {e}")

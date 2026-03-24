@@ -15,5 +15,28 @@ export default defineConfig({
         rewrite: (path) => path.replace(/^\/api/, ''),
       },
     },
+    watch: {
+      usePolling: false,
+      awaitWriteFinish: {
+        stabilityThreshold: 100,
+        pollInterval: 100,
+      },
+    },
+  },
+  build: {
+    // Faster build, smaller output
+    target: 'esnext',
+    minify: 'terser',
+    terserOptions: {
+      compress: { drop_console: true },
+    },
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'react-vendor': ['react', 'react-dom'],
+          'lucide': ['lucide-react'],
+        },
+      },
+    },
   },
 })

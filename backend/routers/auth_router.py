@@ -6,7 +6,8 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional
 from datetime import timedelta
 import hashlib
-import httpx
+import re
+import requests
 from psycopg2.extras import RealDictCursor
 from backend.database import get_db_connection
 from backend.auth import (
@@ -28,6 +29,13 @@ class UserRegister(BaseModel):
 class UserLogin(BaseModel):
     email: str
     password: str
+
+
+class SocialAuthRequest(BaseModel):
+    credential: str
+    provider: str
+    role: Optional[str] = "recruiter"
+    mode: Optional[str] = "login"
 
 
 class TokenResponse(BaseModel):
@@ -84,6 +92,52 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return hash_password(plain_password) == hashed_password
 
 
+def _sanitize_username(seed: str) -> str:
+    raw = (seed or "user").strip().lower()
+    raw = re.sub(r"[^a-z0-9._-]", "", raw)
+    return raw[:30] or "user"
+
+
+def _build_unique_username(cur, preferred: str) -> str:
+    base = _sanitize_username(preferred)
+    candidate = base
+    suffix = 1
+    while True:
+        cur.execute("SELECT 1 FROM users WHERE username = %s", (candidate,))
+        if not cur.fetchone():
+            return candidate
+        candidate = f"{base}{suffix}"
+        suffix += 1
+
+
+def _fetch_google_profile(access_token: str) -> dict:
+    try:
+        response = requests.get(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+    except requests.RequestException:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Unable to reach Google OAuth services",
+        )
+
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Google credential",
+        )
+
+    profile = response.json()
+    if not profile.get("email"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google account email is unavailable",
+        )
+    return profile
+
+
 @router.post("/register", response_model=TokenResponse)
 async def register(user_data: UserRegister):
     """
@@ -97,12 +151,21 @@ async def register(user_data: UserRegister):
     """
     conn = None
     try:
+        normalized_email = (user_data.email or "").strip().lower()
+        normalized_username = (user_data.username or "").strip()
+        if not normalized_email or not normalized_username:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username and email are required",
+            )
+
         conn = get_db_connection()
+        ensure_users_table(conn)
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Check if user already exists
             cur.execute(
-                "SELECT id FROM users WHERE email = %s OR username = %s",
-                (user_data.email, user_data.username)
+                "SELECT id FROM users WHERE LOWER(email) = LOWER(%s) OR username = %s",
+                (normalized_email, normalized_username)
             )
             if cur.fetchone():
                 raise HTTPException(
@@ -126,7 +189,7 @@ async def register(user_data: UserRegister):
                 VALUES (%s, %s, %s, %s, TRUE)
                 RETURNING id, username, email, role
                 """,
-                (user_data.username, user_data.email, hashed_pwd, user_data.role)
+                (normalized_username, normalized_email, hashed_pwd, user_data.role)
             )
             user = cur.fetchone()
             conn.commit()
@@ -134,7 +197,7 @@ async def register(user_data: UserRegister):
             # Generate token
             permissions = get_role_permissions(user_data.role)
             token = create_access_token(
-                data={"username": user_data.username},
+                data={"username": user["username"]},
                 user_id=user["id"],
                 role=user_data.role,
                 expires_delta=timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
@@ -165,6 +228,125 @@ async def register(user_data: UserRegister):
             conn.close()
 
 
+@router.post("/social", response_model=TokenResponse)
+async def social_auth(payload: SocialAuthRequest):
+    """
+    Social authentication endpoint.
+    Currently supports Google access tokens from the frontend OAuth flow.
+    """
+    provider = (payload.provider or "").strip().lower()
+    credential = (payload.credential or "").strip()
+    auth_mode = (payload.mode or "login").strip().lower()
+
+    if not credential:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing social credential",
+        )
+
+    if provider == "github":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="GitHub social login is not configured on backend",
+        )
+    if provider != "google":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported social provider",
+        )
+    if auth_mode not in {"login", "signup"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid social auth mode. Use 'login' or 'signup'",
+        )
+
+    profile = _fetch_google_profile(credential)
+    email = profile.get("email", "").strip().lower()
+    display_name = profile.get("name") or email.split("@")[0]
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        ensure_users_table(conn)
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, username, email, role FROM users WHERE email = %s",
+                (email,),
+            )
+            user = cur.fetchone()
+
+            if auth_mode == "login":
+                if not user:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="No account found for this Google email. Please sign up first",
+                    )
+            else:
+                if user:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Account already exists. Please sign in instead",
+                    )
+
+                valid_roles = ["super_admin", "recruiter", "interviewer", "candidate"]
+                requested_role = payload.role if payload.role in valid_roles else "recruiter"
+
+                preferred_username = _sanitize_username(email.split("@")[0] or display_name)
+                username = _build_unique_username(cur, preferred_username)
+
+                # Keep schema compatibility: users.password_hash is NOT NULL.
+                synthetic_password_hash = hash_password(f"social::{provider}::{email}")
+
+                cur.execute(
+                    """
+                    INSERT INTO users (username, email, password_hash, role, is_active)
+                    VALUES (%s, %s, %s, %s, TRUE)
+                    RETURNING id, username, email, role
+                    """,
+                    (username, email, synthetic_password_hash, requested_role),
+                )
+                user = cur.fetchone()
+
+            cur.execute(
+                "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = %s",
+                (user["id"],),
+            )
+            conn.commit()
+
+            permissions = get_role_permissions(user["role"])
+            token = create_access_token(
+                data={"username": user["username"]},
+                user_id=user["id"],
+                role=user["role"],
+                expires_delta=timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS),
+            )
+
+            return {
+                "access_token": token,
+                "token_type": "bearer",
+                "user": {
+                    "id": user["id"],
+                    "username": user["username"],
+                    "email": user["email"],
+                    "role": user["role"],
+                    "permissions": permissions,
+                },
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+    finally:
+        if conn:
+            conn.close()
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(credentials: UserLogin):
     """
@@ -173,19 +355,38 @@ async def login(credentials: UserLogin):
     """
     conn = None
     try:
+        identifier = (credentials.email or "").strip()
+        if not identifier:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email is required",
+            )
+
         conn = get_db_connection()
+        ensure_users_table(conn)
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # Query user by email
+            # Query user by email (case-insensitive) and allow username as fallback.
             cur.execute(
-                "SELECT id, username, email, password_hash, role FROM users WHERE email = %s AND is_active = TRUE",
-                (credentials.email,)
+                """
+                SELECT id, username, email, password_hash, role
+                FROM users
+                WHERE (LOWER(email) = LOWER(%s) OR username = %s)
+                  AND is_active = TRUE
+                """,
+                (identifier, identifier)
             )
             user = cur.fetchone()
-            
-            if not user or not verify_password(credentials.password, user["password_hash"]):
+
+            if not user:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid email or password"
+                    detail="No account found for this email. Please sign up first"
+                )
+
+            if not verify_password(credentials.password, user["password_hash"]):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid password"
                 )
             
             # Update last_login
@@ -310,152 +511,6 @@ async def refresh_token(current_user: dict = Depends(get_current_user)):
                 }
             }
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
-    finally:
-        if conn:
-            conn.close()
-
-
-@router.post("/social", response_model=TokenResponse)
-async def social_login(payload: dict):
-    """
-    Social login endpoint for Google (Real) and Apple (Mock).
-    """
-    provider = payload.get("provider", "google")
-    role = payload.get("role", "recruiter")
-    
-    email = None
-    username = None
-    
-    if provider == "google":
-        token = payload.get("credential")
-        if not token:
-            raise HTTPException(status_code=400, detail="Google token required")
-        
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(f"https://www.googleapis.com/oauth2/v3/userinfo?access_token={token}")
-                if resp.status_code != 200:
-                    raise HTTPException(status_code=401, detail="Invalid Google token")
-                
-                google_user = resp.json()
-                email = google_user.get("email")
-                username = google_user.get("name", email.split('@')[0])
-        except HTTPException:
-            raise
-        except Exception as e:
-            print(f"--> SOCIAL LOGIN ERROR (Google): {e}")
-            raise HTTPException(status_code=500, detail=f"Google verification failed: {str(e)}")
-    elif provider == "github":
-        code = payload.get("credential")
-        if not code:
-            raise HTTPException(status_code=400, detail="GitHub code required")
-        
-        try:
-            async with httpx.AsyncClient() as client:
-                # 1. Exchange code for access token
-                client_id = "Ov23liLdm7eOHKd3nbmo"
-                client_secret = "204adcde7a16e72d0919e186757fe275c6c0dddd"
-                
-                token_resp = await client.post(
-                    "https://github.com/login/oauth/access_token",
-                    headers={"Accept": "application/json"},
-                    data={
-                        "client_id": client_id,
-                        "client_secret": client_secret,
-                        "code": code
-                    }
-                )
-                
-                if token_resp.status_code != 200:
-                    raise HTTPException(status_code=401, detail="Failed to exchange GitHub code")
-                
-                token_data = token_resp.json()
-                gh_access_token = token_data.get("access_token")
-                
-                if not gh_access_token:
-                    raise HTTPException(status_code=401, detail="Invalid GitHub code or secret")
-                
-                # 2. Fetch user profile
-                user_resp = await client.get(
-                    "https://api.github.com/user",
-                    headers={"Authorization": f"token {gh_access_token}"}
-                )
-                gh_user = user_resp.json()
-                
-                # 3. Fetch primary email
-                email_resp = await client.get(
-                    "https://api.github.com/user/emails",
-                    headers={"Authorization": f"token {gh_access_token}"}
-                )
-                emails = email_resp.json()
-                primary_email = next((e["email"] for e in emails if e["primary"]), None)
-                
-                email = primary_email or gh_user.get("email")
-                username = gh_user.get("login")
-        except HTTPException:
-            raise
-        except Exception as e:
-            print(f"--> SOCIAL LOGIN ERROR (GitHub): {e}")
-            raise HTTPException(status_code=500, detail=f"GitHub OAuth failed: {str(e)}")
-    else:
-        email = payload.get("email")
-        username = payload.get("username", email.split('@')[0] if email else "social_user")
-    
-    if not email:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email is required for social login"
-        )
-    
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # Check if user already exists
-            cur.execute("SELECT id, username, email, role FROM users WHERE email = %s", (email,))
-            user = cur.fetchone()
-            
-            if not user:
-                # Create new social user
-                dummy_pwd = hash_password(f"social_{email}_{provider}")
-                cur.execute(
-                    """
-                    INSERT INTO users (username, email, password_hash, role, is_active)
-                    VALUES (%s, %s, %s, %s, TRUE)
-                    RETURNING id, username, email, role
-                    """,
-                    (username, email, dummy_pwd, role)
-                )
-                user = cur.fetchone()
-                conn.commit()
-            
-            # Generate token
-            permissions = get_role_permissions(user["role"])
-            token = create_access_token(
-                data={"username": user["username"]},
-                user_id=user["id"],
-                role=user["role"],
-                expires_delta=timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
-            )
-            
-            return {
-                "access_token": token,
-                "token_type": "bearer",
-                "user": {
-                    "id": user["id"],
-                    "username": user["username"],
-                    "email": user["email"],
-                    "role": user["role"],
-                    "permissions": permissions
-                }
-            }
-    except Exception as e:
-        if conn:
-            conn.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)

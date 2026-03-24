@@ -128,9 +128,20 @@ const TopBar = ({ activeTab, onTabChange, user, onLogout, notifications, showNot
             )}
           </button>
 
+          {/* Backdrop to close on outside click */}
+          {showNotifs && (
+            <div 
+              className="fixed inset-0 z-[99]" 
+              onClick={() => setShowNotifs(false)}
+            />
+          )}
+
           {/* Notifications Overlay */}
           {showNotifs && (
-            <div className="absolute right-0 top-full mt-4 w-96 bg-white border border-gray-200 !rounded-3xl shadow-2xl z-[100] overflow-hidden animate-fade-in">
+            <div 
+              className="absolute right-0 top-full mt-4 w-96 bg-white border border-gray-200 !rounded-3xl shadow-2xl z-[100] overflow-hidden animate-fade-in"
+              onClick={(e) => e.stopPropagation()}
+            >
               <div className="p-6 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
                 <h3 className="text-sm font-black text-gray-900 tracking-widest uppercase">Notifications</h3>
                 <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-1 rounded-lg uppercase tracking-widest">
@@ -173,7 +184,7 @@ const TopBar = ({ activeTab, onTabChange, user, onLogout, notifications, showNot
           <div className="absolute right-0 top-full mt-3 w-56 bg-white border border-gray-200 !rounded-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 shadow-2xl overflow-hidden">
             <div className="p-5 border-b border-gray-100 bg-gray-50/50">
               <p className="text-sm font-black text-gray-900">{user?.username || 'User'}</p>
-              <p className="text-xs text-gray-500">{user?.email || 'email@example.com'}</p>
+              <p className="text-xs text-gray-500">{user?.email || ''}</p>
             </div>
             <button
               onClick={() => onTabChange('settings')}
@@ -369,10 +380,9 @@ const HRScreening = () => {
 
     const successCount = uploadResults.filter(r => r.status === 'success').length;
 
-    // Wait for n8n to finish processing all uploaded resumes before fetching results.
-    // Each resume takes ~3-5s in the n8n pipeline (PDF extract → AI score → DB write).
-    const processingWaitMs = successCount * 5000;
-    await new Promise(resolve => setTimeout(resolve, processingWaitMs));
+    // Start polling quickly instead of fixed waiting per resume.
+    // This avoids artificial delay and lets UI render partial results as soon as DB rows appear.
+    await new Promise(resolve => setTimeout(resolve, 500));
 
     // Trigger start-screening webhook ONCE — this runs Filter Shortlisted →
     // Trigger Interview Scheduling in n8n. We fire-and-forget it (don't loop).
@@ -397,7 +407,7 @@ const HRScreening = () => {
     // Poll the FastAPI DB endpoint for results (NOT the n8n webhook).
     // This avoids triggering extra n8n executions on every poll tick.
     const RESULTS_URL = `http://localhost:8000/jobs/results/${jobId}`;
-    const pollDeadline = Date.now() + 180000; // 3 min timeout
+    const pollDeadline = Date.now() + 120000; // 2 min timeout
     let uiResults = [];
 
     try {
@@ -444,11 +454,11 @@ const HRScreening = () => {
 
             if (deDupedRows.length >= successCount) break;
           }
-          // Not all results ready yet — wait 4s and retry
-          await new Promise(resolve => setTimeout(resolve, 4000));
+          // Not all results ready yet — retry quickly for responsive UI
+          await new Promise(resolve => setTimeout(resolve, 1200));
         } catch (fetchErr) {
-          // Transient fetch error — wait and retry
-          await new Promise(resolve => setTimeout(resolve, 4000));
+          // Transient fetch error — short wait and retry
+          await new Promise(resolve => setTimeout(resolve, 1200));
         }
       }
 

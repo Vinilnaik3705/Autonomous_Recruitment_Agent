@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Architecture - HR Automation Platform Documentation</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Architecture";
+        var mkdocs_page_input_path = "architecture.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> HR Automation Platform Documentation
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../about/">Project Overview</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../getting-started/">Getting Started</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Architecture</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#system-components">System components</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#frontend">Frontend</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#backend">Backend</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#data-model-high-level">Data model (high-level)</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#ai-and-scoring-flow">AI and scoring flow</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#oa-and-interview-orchestration">OA and interview orchestration</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#deployment-topology-local-default">Deployment topology (local default)</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#design-choices">Design choices</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../backend-api/">Backend API</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../workflows/">Workflow Guide</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../status/">Project Status</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../challenges-limitations/">Challenges and Limitations</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../troubleshooting/">Troubleshooting</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">HR Automation Platform Documentation</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Architecture</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="architecture">Architecture</h1>
+<h2 id="system-components">System components</h2>
+<p>The platform has four major layers:</p>
+<ol>
+<li>Frontend UI (React/Vite)</li>
+<li>Backend API (FastAPI)</li>
+<li>Data layer (PostgreSQL)</li>
+<li>Workflow orchestration (n8n)</li>
+</ol>
+<h2 id="frontend">Frontend</h2>
+<p>Key behavior:</p>
+<ul>
+<li>Uses Axios client with base path <code>/api</code></li>
+<li>Vite proxy forwards <code>/api/*</code> to backend port 8000</li>
+<li>Stores auth token in local storage and sends Bearer token</li>
+<li>Shows role-aware interfaces:</li>
+<li>Candidate portal</li>
+<li>Interviewer status view</li>
+<li>Recruiter/super-admin HR panel</li>
+</ul>
+<h2 id="backend">Backend</h2>
+<p>Main API app:</p>
+<ul>
+<li>FastAPI app with CORS enabled</li>
+<li>Routers registered for auth, jobs, candidate, notifications, OA, email</li>
+<li>Startup hook runs DB initialization and migration logic</li>
+<li>Service modules initialize for scheduling, feedback, onboarding, and resume analysis</li>
+</ul>
+<p>Core modules:</p>
+<ul>
+<li><code>database.py</code>: connection logic with host/port fallback support</li>
+<li><code>init_db.py</code>: schema creation, migration tracking, non-destructive hotfixes</li>
+<li><code>services/</code>: business logic for scheduling, feedback, matching, onboarding, parsing</li>
+<li><code>routers/</code>: API grouping by domain</li>
+</ul>
+<h2 id="data-model-high-level">Data model (high-level)</h2>
+<p>Primary tables include:</p>
+<ul>
+<li><code>users</code></li>
+<li><code>job_descriptions</code></li>
+<li><code>resume_files</code></li>
+<li><code>resume_data</code></li>
+<li><code>candidates</code></li>
+<li><code>interview_schedules</code></li>
+<li><code>interview_feedback</code></li>
+<li><code>onboarding_tasks</code></li>
+<li><code>notifications</code></li>
+<li><code>schema_migrations</code></li>
+</ul>
+<h2 id="ai-and-scoring-flow">AI and scoring flow</h2>
+<ul>
+<li>Resume text is extracted from PDF/DOCX</li>
+<li>Candidate profile signals are parsed (name, email, phone, skills)</li>
+<li>Embeddings-based semantic score is computed against job description</li>
+<li>Threshold determines shortlist behavior (currently used in workflows)</li>
+</ul>
+<h2 id="oa-and-interview-orchestration">OA and interview orchestration</h2>
+<ul>
+<li>OA launch links can include callback metadata</li>
+<li>OA completion callback or direct submit updates score in DB immediately</li>
+<li>Passing score triggers scheduling workflow webhook</li>
+<li>Interview lifecycle includes schedule, reminders, feedback kits, no-show checks, and decisions</li>
+</ul>
+<h2 id="deployment-topology-local-default">Deployment topology (local default)</h2>
+<ul>
+<li>Postgres container: 5433:5432</li>
+<li>FastAPI container: 8000:8000</li>
+<li>n8n container: 5678:5678</li>
+<li>Frontend dev server: 5173 (outside compose)</li>
+</ul>
+<h2 id="design-choices">Design choices</h2>
+<ul>
+<li>Idempotent DB initialization to support repeated startup</li>
+<li>Non-destructive schema compatibility updates for older DB states</li>
+<li>Background tasks for email/scheduling side-effects</li>
+<li>Multiple payload shape handling in OA callbacks for integration resilience</li>
+</ul>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../getting-started/" class="btn btn-neutral float-left" title="Getting Started"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../backend-api/" class="btn btn-neutral float-right" title="Backend API">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href="../getting-started/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../backend-api/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

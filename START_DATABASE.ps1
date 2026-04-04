@@ -57,13 +57,30 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "⚠️  Database initialization had issues. Check if tables exist." -ForegroundColor Yellow
 }
 
+# Start N8N workflow engine
+if ($running -like "*n8n*") {
+    Write-Host "⚠️  N8N is already running." -ForegroundColor Yellow
+} else {
+    Write-Host "🚀 Starting N8N workflow engine..." -ForegroundColor Green
+    docker-compose up -d n8n
+    Write-Host "⏳ Waiting for N8N to be ready (30 seconds)..." -ForegroundColor Yellow
+    Start-Sleep -Seconds 30
+    Write-Host "✅ N8N is starting at http://localhost:5678" -ForegroundColor Green
+}
+
 Write-Host ""
 Write-Host "================================" -ForegroundColor Cyan
-Write-Host "✅ DATABASE IS READY!" -ForegroundColor Green
+Write-Host "✅ ALL SERVICES READY!" -ForegroundColor Green
 Write-Host "================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Running services:" -ForegroundColor Cyan
+Write-Host "  ✓ PostgreSQL: localhost:5433" -ForegroundColor Green
+Write-Host "  ✓ N8N Workflows: http://localhost:5678" -ForegroundColor Green
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
 Write-Host "1. In another terminal, start the backend: uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000" -ForegroundColor White
 Write-Host "2. In another terminal, start frontend: cd frontend && npm run dev" -ForegroundColor White
+Write-Host ""
+Write-Host "💡 Tip: All three services (DB, N8N, Backend) must be running for uploads to work!" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Stop everything with: docker-compose down" -ForegroundColor Gray

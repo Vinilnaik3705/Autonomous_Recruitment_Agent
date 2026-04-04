@@ -110,9 +110,11 @@ const TopBar = ({ activeTab, onTabChange, user, onLogout, notifications, showNot
 
     {/* Right side */}
     <div className="ml-auto flex items-center gap-8">
-      <div className="flex items-center gap-2 text-gray-400 font-bold text-xs uppercase tracking-widest hidden lg:flex">
-        <Clock className="w-4 h-4 text-orange-500" />
-        <span>{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}, {new Date().toLocaleDateString([], { month: 'long', day: 'numeric' })}</span>
+      <div className="hidden lg:block text-gray-400 font-bold text-xs uppercase tracking-widest">
+        <div className="flex items-center gap-2">
+          <Clock className="w-4 h-4 text-orange-500" />
+          <span>{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}, {new Date().toLocaleDateString([], { month: 'long', day: 'numeric' })}</span>
+        </div>
       </div>
 
       <div className="flex items-center gap-4">
@@ -208,6 +210,8 @@ const TopBar = ({ activeTab, onTabChange, user, onLogout, notifications, showNot
 /* --- File upload status dot ------------------------------- */
 const statusDot = (s) =>
   s === 'success' ? 'bg-green-400' : s === 'error' ? 'bg-red-400' : 'bg-blue-400';
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 /* --- Main Component ---------------------------------------- */
 const HRScreening = () => {
@@ -329,14 +333,43 @@ const HRScreening = () => {
     if (!resumes.length) return alert('Please upload resumes first!');
     if (!jdText.trim()) return alert('Please provide a Job Description.');
 
+    const screeningStartedAt = Date.now();
+    const minResultsDwellMs = 1200;
+
+    // Non-blocking health check: if n8n is unavailable, fallback to direct batch screening.
+    let n8nHealthy = false;
+    for (const healthUrl of ['/api/jobs/health', 'http://127.0.0.1:8000/jobs/health']) {
+      try {
+        const healthRes = await fetch(healthUrl);
+        if (!healthRes.ok) continue;
+        const health = await healthRes.json();
+        if (health.status === 'healthy') {
+          n8nHealthy = true;
+          break;
+        }
+      } catch {
+        // Try the next health endpoint.
+      }
+    }
+    
+    // Last-chance probe from browser context: backend health may fail when
+    // backend and n8n use different hostnames across docker/local runs.
+    if (!n8nHealthy) {
+      try {
+        await fetch('http://localhost:5678', { mode: 'no-cors' });
+        n8nHealthy = true;
+      } catch {
+        // Keep unhealthy=false and use backend fallback.
+      }
+    }
+
     setProcessing(true);
     setMatchResults(null);
 
     const USE_TEST_WEBHOOKS = false;
     const N8N_BASE = 'http://localhost:5678';
     const N8N_UPLOAD_URL = '/api/jobs/n8n-proxy';
-    const SCREEN_PATH = USE_TEST_WEBHOOKS ? 'webhook-test/start-screening' : 'webhook/start-screening';
-    const N8N_SCREEN_URL = `${N8N_BASE}/${SCREEN_PATH}`;
+    const SCREEN_TRIGGER_URL = '/api/jobs/start-screening-proxy';
 
     let jobId = `JOB-${Date.now()}`;
     try {
@@ -350,6 +383,77 @@ const HRScreening = () => {
       const jdRes = await createJobDescription(jdData);
       if (jdRes?.job_id) jobId = jdRes.job_id;
     } catch { /* use timestamp jobId */ }
+
+    if (!n8nHealthy) {
+      try {
+        addNotification({
+          type: 'info',
+          title: 'Fallback Screening Mode',
+          message: 'Workflow engine is unavailable. Running direct screening from backend.',
+        });
+
+        const batchForm = new FormData();
+        resumes.forEach(file => batchForm.append('files', file));
+        batchForm.append('jobId', jobId);
+
+        const batchRes = await fetch('/api/jobs/batch-screen', {
+          method: 'POST',
+          body: batchForm,
+        });
+        if (!batchRes.ok) throw new Error(`Batch screening failed: HTTP ${batchRes.status}`);
+
+        const batchData = await batchRes.json();
+        const uiResults = (batchData.candidates || []).map(c => ({
+          Name: c.candidate_name || 'Unknown',
+          File: c.file_name || 'Processed via Backend',
+          ResumeScore: (parseFloat(c.score || 0) * 0.01),
+          OAScore: 0,
+          Email: c.email || '',
+          Phone: c.phone || '',
+          Skills: c.skills || '',
+          Education: c.summary || '',
+          shortlisted: !!c.shortlisted,
+        })).sort((a, b) => (b.ResumeScore + b.OAScore) - (a.ResumeScore + a.OAScore));
+
+        if (!uiResults.length) {
+          throw new Error('No screening results returned from backend.');
+        }
+
+        setUploadStatus(prev => {
+          const next = { ...prev };
+          resumes.forEach(file => {
+            next[file.name] = 'success';
+          });
+          return next;
+        });
+
+        const elapsed = Date.now() - screeningStartedAt;
+        if (elapsed < minResultsDwellMs) {
+          await sleep(minResultsDwellMs - elapsed);
+        }
+
+        setMatchResults(uiResults);
+        setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+
+        const sl = uiResults.filter(r => r.shortlisted).length;
+        addNotification({
+          type: 'success',
+          title: 'Resume Screening Agent',
+          message: `Resume screening completed in fallback mode. ${sl} of ${uiResults.length} shortlisted.`,
+          icon: <Sparkles className="w-5 h-5" />,
+        });
+      } catch (err) {
+        addNotification({
+          type: 'alert',
+          title: 'Screening Error',
+          message: `Resume screening failed: ${err.message}`,
+        });
+        alert(`Screening error: ${err.message}`);
+      } finally {
+        setProcessing(false);
+      }
+      return;
+    }
 
     const newStatus = {};
     resumes.forEach(f => (newStatus[f.name] = 'processing'));
@@ -373,8 +477,60 @@ const HRScreening = () => {
     }));
 
     if (uploadResults.every(r => r.status === 'error')) {
-      alert(`All uploads failed. Check N8N is running at ${N8N_BASE}.`);
-      setProcessing(false);
+      try {
+        addNotification({
+          type: 'info',
+          title: 'Fallback Screening Mode',
+          message: 'N8N upload failed for all files. Running direct screening from backend.',
+        });
+
+        const batchForm = new FormData();
+        resumes.forEach(file => batchForm.append('files', file));
+        batchForm.append('jobId', jobId);
+
+        const batchRes = await fetch('/api/jobs/batch-screen', {
+          method: 'POST',
+          body: batchForm,
+        });
+        if (!batchRes.ok) throw new Error(`Batch screening failed: HTTP ${batchRes.status}`);
+
+        const batchData = await batchRes.json();
+        const fallbackResults = (batchData.candidates || []).map(c => ({
+          Name: c.candidate_name || 'Unknown',
+          File: c.file_name || 'Processed via Backend',
+          ResumeScore: (parseFloat(c.score || 0) * 0.01),
+          OAScore: 0,
+          Email: c.email || '',
+          Phone: c.phone || '',
+          Skills: c.skills || '',
+          Education: c.summary || '',
+          shortlisted: !!c.shortlisted,
+        })).sort((a, b) => (b.ResumeScore + b.OAScore) - (a.ResumeScore + a.OAScore));
+
+        if (!fallbackResults.length) {
+          throw new Error('No screening results returned from backend fallback.');
+        }
+
+        setUploadStatus(prev => {
+          const next = { ...prev };
+          resumes.forEach(file => {
+            next[file.name] = 'success';
+          });
+          return next;
+        });
+
+        const elapsed = Date.now() - screeningStartedAt;
+        if (elapsed < minResultsDwellMs) {
+          await sleep(minResultsDwellMs - elapsed);
+        }
+
+        setMatchResults(fallbackResults);
+        setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+      } catch (fallbackErr) {
+        alert(`❌ All uploads failed. Troubleshooting:\n\n1. Check N8N is running at ${N8N_BASE}\n2. Verify the backend is running on port 8000\n3. Run START_DATABASE.ps1 to start all services\n\nFallback also failed: ${fallbackErr.message}`);
+      } finally {
+        setProcessing(false);
+      }
       return;
     }
 
@@ -384,13 +540,14 @@ const HRScreening = () => {
     // This avoids artificial delay and lets UI render partial results as soon as DB rows appear.
     await new Promise(resolve => setTimeout(resolve, 500));
 
-    // Trigger start-screening webhook ONCE — this runs Filter Shortlisted →
-    // Trigger Interview Scheduling in n8n. We fire-and-forget it (don't loop).
+    // Trigger start-screening webhook ONCE through FastAPI to avoid browser CORS.
     try {
-      const res = await fetch(N8N_SCREEN_URL, {
+      const form = new FormData();
+      form.append('jobId', jobId);
+
+      const res = await fetch(SCREEN_TRIGGER_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId }),
+        body: form,
       });
 
       if (res.ok) {
@@ -433,7 +590,9 @@ const HRScreening = () => {
               distinctMap.set(key, row);
               return;
             }
-            if (!distinctMap.has(email) || (parseFloat(row.ai_score || 0) > parseFloat(distinctMap.get(email).ai_score || 0))) {
+            const rowScore = parseFloat(row.resume_match_score || row.match_score || row.ai_score || 0);
+            const existingScore = parseFloat(distinctMap.get(email)?.resume_match_score || distinctMap.get(email)?.match_score || distinctMap.get(email)?.ai_score || 0);
+            if (!distinctMap.has(email) || rowScore > existingScore) {
               distinctMap.set(email, row);
             }
           });
@@ -449,7 +608,11 @@ const HRScreening = () => {
               Phone: r.phone || '',
               Skills: typeof r.skills === 'string' ? r.skills : (Array.isArray(r.skills) ? r.skills.join(', ') : ''),
               Education: r.ai_summary || '',
-              shortlisted: r.status === 'SHORTLISTED' || r.interview_status === 'SHORTLISTED'
+              shortlisted: (() => {
+                const status = String(r.status || r.interview_status || '').trim().toUpperCase();
+                const score = parseFloat(r.resume_match_score || r.match_score || r.ai_score || 0);
+                return status === 'SHORTLISTED' || score >= 35;
+              })()
             })).sort((a, b) => (b.ResumeScore + b.OAScore) - (a.ResumeScore + a.OAScore));
 
             if (deDupedRows.length >= successCount) break;
@@ -464,6 +627,11 @@ const HRScreening = () => {
 
       if (!uiResults.length) {
         throw new Error('Screening timed out. Check N8N logs for errors.');
+      }
+
+      const elapsed = Date.now() - screeningStartedAt;
+      if (elapsed < minResultsDwellMs) {
+        await sleep(minResultsDwellMs - elapsed);
       }
 
       setMatchResults(uiResults);
@@ -824,7 +992,7 @@ const HRScreening = () => {
                           <button onClick={handleGenerateJD} disabled={isGeneratingJD}
                             className="btn-orange py-3 flex items-center justify-center gap-2 text-sm w-full">
                             {isGeneratingJD
-                              ? <><Loader2 className="w-4 h-4 animate-spin" /> Generating�</>
+                              ? <><Loader2 className="w-4 h-4 animate-spin" /> Generating</>
                               : <><Sparkles className="w-4 h-4" /> Generate Job Description</>
                             }
                           </button>
@@ -872,7 +1040,7 @@ const HRScreening = () => {
                         <table className="w-full text-sm text-left">
                           <thead>
                             <tr className="text-[10px] uppercase font-black tracking-[0.15em] text-gray-400 bg-white/5 border-b border-white/10">
-                              {['Rank', 'Candidate details', 'AI Verdict', 'Resume Score', 'OA Score', 'Contact', 'Skills'].map(h => (
+                              {['Rank', 'Candidate details', 'AI Verdict', 'Resume Score', 'Contact', 'Skills'].map(h => (
                                 <th key={h} className="px-8 py-5 whitespace-nowrap">{h}</th>
                               ))}
                             </tr>
@@ -906,7 +1074,6 @@ const HRScreening = () => {
                                   )}
                                 </td>
                                 <td className="px-8 py-6"><ScorePill score={c.ResumeScore} /></td>
-                                <td className="px-8 py-6"><ScorePill score={c.OAScore} /></td>
                                 <td className="px-5 py-4 space-y-1">
                                   {c.Email && (
                                     <a href={`mailto:${c.Email}`}

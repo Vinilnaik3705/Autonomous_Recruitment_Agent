@@ -8,12 +8,14 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 from typing import Dict, Optional, List
+import requests
 from backend.services.resume_service import parse_resume, save_resume_to_db, save_resumes_batch
 from backend.database import get_db_connection
+from backend.phase_logger import log_phase_completion
 from backend.routers import email_router
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="HR Automation Agent API")
+app = FastAPI(title="HR Automation Agent API")  # v3: force reload
 
 app.add_middleware(
     CORSMiddleware,
@@ -84,6 +86,10 @@ def process_batch_files(files_data: List[Dict], user_id: int):
         if parsed_data:
             save_resumes_batch(parsed_data, user_id)
             print(f"Values saved for batch of {len(parsed_data)} files")
+            log_phase_completion(
+                "Resume Screening",
+                f"batch_processed={len(parsed_data)} user_id={user_id}",
+            )
             
     except Exception as e:
         print(f"Batch processing failed: {e}")
@@ -255,6 +261,10 @@ def schedule_interview(req: ScheduleRequest):
         # Construct dict expected by service
         candidate_data = {"email": req.candidate_email, "name": req.candidate_name}
         interview_id = scheduler.schedule_interview(candidate_data, req.interviewer_id, req.slot_iso)
+        log_phase_completion(
+            "Interview Scheduling",
+            f"candidate={req.candidate_email} interview_id={interview_id}",
+        )
         return {"status": "scheduled", "interview_id": interview_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -315,6 +325,11 @@ def reschedule_interview(req: RescheduleRequest):
     try:
         candidate_data = {"email": req.candidate_email, "name": req.candidate_name}
         success = scheduler.reschedule_interview(req.interview_id, candidate_data, req.new_slot_iso)
+        if success:
+            log_phase_completion(
+                "Interview Rescheduling",
+                f"candidate={req.candidate_email} interview_id={req.interview_id}",
+            )
         return {"status": "rescheduled", "interview_id": req.interview_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -368,6 +383,11 @@ def send_feedback_kits(window_minutes: int = 15):
                 scheduled_time=str(iv["scheduled_time"]),
             )
             sent.append(iv["interview_id"])
+        if sent:
+            log_phase_completion(
+                "Feedback Kit Dispatch",
+                f"kits_sent={len(sent)} interviews={sent}",
+            )
         return {"kits_sent": len(sent), "interview_ids": sent}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -407,6 +427,11 @@ def apply_decision(interview_id: int):
                 next_round_number=2, next_round_label="Technical Round"
             )
 
+        log_phase_completion(
+            "Interview Decision",
+            f"interview_id={interview_id} candidate={candidate_email} decision={decision}",
+        )
+
         return {"decision": decision, "interview_id": interview_id, "candidate": candidate_name}
     except HTTPException:
         raise
@@ -436,10 +461,41 @@ class FeedbackCollectRequest(BaseModel):
     recommendation: str
     comments: str
 
+
+def trigger_feedback_collection_workflow(feedback_payload: Dict) -> Dict:
+    """
+    Trigger n8n workflow after feedback submission.
+    Returns trigger metadata for observability.
+    """
+    webhook_url = os.getenv(
+        "N8N_FEEDBACK_COLLECTION_WEBHOOK",
+        "http://localhost:5678/webhook/feedback-collection",
+    )
+
+    try:
+        response = requests.post(webhook_url, json=feedback_payload, timeout=8)
+        return {
+            "workflow_triggered": response.status_code < 500,
+            "workflow_status_code": response.status_code,
+            "workflow_webhook": webhook_url,
+        }
+    except Exception as exc:
+        print(f"Feedback workflow trigger failed: {exc}")
+        return {
+            "workflow_triggered": False,
+            "workflow_status_code": None,
+            "workflow_webhook": webhook_url,
+            "workflow_error": str(exc),
+        }
+
 @app.post("/interview/feedback")
 def submit_feedback(req: FeedbackRequest):
     try:
         feedback_service.submit_feedback(req.interview_id, req.model_dump())
+        log_phase_completion(
+            "Interview Feedback",
+            f"interview_id={req.interview_id}",
+        )
         return {"status": "submitted"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -506,9 +562,30 @@ def collect_feedback(req: FeedbackCollectRequest):
             "detailed_feedback": details,
         }
         feedback_service.submit_feedback(interview_id, payload)
+        log_phase_completion(
+            "Interview Feedback",
+            f"interview_id={interview_id} source=feedback_form",
+        )
+        workflow_result = trigger_feedback_collection_workflow(
+            {
+                "interview_id": interview_id,
+                "candidate_email": req.candidate_email,
+                "candidate_name": req.candidate_name,
+                "round_label": req.round_label,
+                "technical_score": req.technical_score,
+                "communication_score": req.communication_score,
+                "cultural_fit_score": req.cultural_fit_score,
+                "overall_rating": req.overall_rating,
+                "recommendation": normalized_recommendation,
+                "comments": req.comments,
+                "source": "feedback_form",
+            }
+        )
+
         return {
             "status": "submitted",
             "interview_id": interview_id,
+            **workflow_result,
         }
     except HTTPException:
         raise
@@ -626,6 +703,10 @@ def initiate_onboarding(req: OnboardingRequest):
     try:
         success = onboarding_service.initiate_onboarding(req.candidate_email, req.model_dump())
         if success:
+            log_phase_completion(
+                "Onboarding",
+                f"candidate={req.candidate_email} start_date={req.start_date}",
+            )
             return {"status": "onboarding_started"}
         else:
             raise HTTPException(status_code=404, detail="Candidate not found")

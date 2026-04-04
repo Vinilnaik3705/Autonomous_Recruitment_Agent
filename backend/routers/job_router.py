@@ -1,12 +1,52 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional, List
 from backend.database import get_db_connection
 import uuid
 import os
 import hashlib
+from backend.phase_logger import log_phase_completion
 
 router = APIRouter(prefix="/jobs", tags=["Jobs"])
+
+
+def _send_shortlisted_resume_email(resume_data_id: int, candidate_name: str, candidate_email: str) -> None:
+    """Send the resume-shortlisted email and mark the DB row as notified."""
+    try:
+        from backend.routers.email_router import EmailRequest, get_resume_shortlisted_email, send_email_via_smtp
+
+        template = get_resume_shortlisted_email(
+            EmailRequest(candidate_email=candidate_email, candidate_name=candidate_name)
+        )
+        if template.get("skipped"):
+            print(f"⚠️ Skipping shortlist email for {candidate_email}: missing candidate data")
+            return
+
+        success, message = send_email_via_smtp(
+            recipient_email=template["recipient_email"],
+            recipient_name=template.get("recipient_name", candidate_name),
+            subject=template["subject"],
+            body=template["body"],
+            is_html=True,
+        )
+        if not success:
+            print(f"⚠️ Shortlist email failed for {candidate_email}: {message}")
+            return
+
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE resume_data SET email_sent = TRUE WHERE id = %s;",
+                    (resume_data_id,),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+
+        print(f"✅ Shortlist email sent to {candidate_email}")
+    except Exception as exc:
+        print(f"⚠️ Error sending shortlist email for {candidate_email}: {exc}")
 
 class JobDescriptionCreate(BaseModel):
     title: str
@@ -64,6 +104,103 @@ def create_job_description(job: JobDescriptionCreate):
 from fastapi import UploadFile, File, Form, Depends
 import httpx
 
+
+def _candidate_n8n_bases(primary_url: str) -> list[str]:
+    """Return deduplicated n8n base URLs that work across local + docker runs."""
+    editor_base = os.environ.get("N8N_EDITOR_BASE_URL")
+    primary_base = primary_url.split("/webhook")[0].rstrip("/")
+    candidates = [
+        editor_base,
+        primary_base,
+        "http://localhost:5678",
+        "http://127.0.0.1:5678",
+        "http://host.docker.internal:5678",
+        "http://n8n:5678",
+    ]
+
+    seen = set()
+    ordered = []
+    for base in candidates:
+        if base and base not in seen:
+            seen.add(base)
+            ordered.append(base.rstrip("/"))
+    return ordered
+
+
+def _candidate_webhook_urls(primary_url: str) -> list[str]:
+    """Build deduplicated webhook candidates preserving original webhook path."""
+    webhook_suffix = primary_url.split(":5678")[-1]
+    urls = [primary_url]
+    for base in _candidate_n8n_bases(primary_url):
+        if "/webhook" in webhook_suffix:
+            urls.append(f"{base}{webhook_suffix}")
+
+    seen = set()
+    ordered = []
+    for url in urls:
+        u = (url or "").rstrip("/")
+        if u and u not in seen:
+            seen.add(u)
+            ordered.append(u)
+    return ordered
+
+@router.get("/health")
+async def check_n8n_health():
+    """
+    Health check endpoint - verifies N8N is reachable.
+    Frontend calls this before attempting uploads.
+    """
+    webhook_url = os.environ.get("N8N_WEBHOOK_URL", "http://localhost:5678/webhook/resume-upload-atomic")
+    editor_base = os.environ.get("N8N_EDITOR_BASE_URL")
+    env_base = (editor_base or webhook_url.split("/webhook")[0]).rstrip("/")
+
+    # Probe multiple common hosts to support mixed local + docker runs.
+    # This avoids false "unhealthy" results when env points to a host only
+    # reachable from one runtime (container vs host machine).
+    candidate_bases = [
+        env_base,
+        "http://localhost:5678",
+        "http://127.0.0.1:5678",
+        "http://host.docker.internal:5678",
+        "http://n8n:5678",
+    ]
+    seen = set()
+    bases_to_probe = []
+    for base in candidate_bases:
+        if base and base not in seen:
+            seen.add(base)
+            bases_to_probe.append(base)
+
+    # n8n versions/configs differ: some return 401/403/404 on API endpoints
+    # even when the service is running. We consider it healthy if host responds < 500.
+    probe_paths = ["/healthz", "/api/v1/me", "/"]
+    errors = []
+
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for base in bases_to_probe:
+            for path in probe_paths:
+                probe_url = f"{base}{path}"
+                try:
+                    response = await client.get(probe_url, follow_redirects=True)
+                    if response.status_code < 500:
+                        return {
+                            "status": "healthy",
+                            "n8n": "running",
+                            "base": base,
+                            "probe": probe_url,
+                            "statusCode": response.status_code,
+                        }
+                except Exception as e:
+                    errors.append(f"{probe_url}: {str(e)}")
+
+    return {
+        "status": "unhealthy",
+        "n8n": "unreachable",
+        "base": env_base,
+        "probed_bases": bases_to_probe,
+        "errors": errors,
+    }
+
 @router.post("/n8n-proxy")
 async def proxy_n8n_resume_upload(
     file: UploadFile = File(...),
@@ -74,6 +211,7 @@ async def proxy_n8n_resume_upload(
     """
     # Using production webhook (works when workflow is activated)
     N8N_WEBHOOK_URL = os.environ.get("N8N_WEBHOOK_URL", "http://localhost:5678/webhook/resume-upload-atomic")
+    webhook_candidates = _candidate_webhook_urls(N8N_WEBHOOK_URL)
     
     print(f"\n{'='*60}")
     print(f"📤 PROXY REQUEST TO N8N")
@@ -82,6 +220,7 @@ async def proxy_n8n_resume_upload(
     print(f"Content-Type: {file.content_type}")
     print(f"Job ID: {jobId}")
     print(f"Target URL: {N8N_WEBHOOK_URL}")
+    print(f"Candidates: {webhook_candidates}")
     
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -99,19 +238,43 @@ async def proxy_n8n_resume_upload(
             }
             
             print(f"Sending request to n8n...")
-            # Forward to n8n
-            response = await client.post(N8N_WEBHOOK_URL, files=files, data=data)
-            
+            response = None
+            attempt_errors = []
+
+            for webhook_url in webhook_candidates:
+                try:
+                    response = await client.post(webhook_url, files=files, data=data)
+                    print(f"Tried: {webhook_url} -> {response.status_code}")
+
+                    if response.status_code == 200:
+                        break
+
+                    attempt_errors.append(f"{webhook_url} -> HTTP {response.status_code}")
+                except Exception as req_exc:
+                    attempt_errors.append(f"{webhook_url} -> {str(req_exc)}")
+
+            if response is None:
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "message": "Unable to reach n8n webhook from backend",
+                        "attempts": attempt_errors,
+                    },
+                )
+
             print(f"✅ Response Status: {response.status_code}")
             print(f"Response Headers: {dict(response.headers)}")
             print(f"Response Body Preview: {response.text[:500]}")
             print(f"{'='*60}\n")
-            
+
             if response.status_code != 200:
-                print(f"❌ n8n Error [{response.status_code}]: {response.text}")
                 raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"n8n Error: {response.text}"
+                    status_code=502,
+                    detail={
+                        "message": "n8n upload webhook did not return HTTP 200",
+                        "attempts": attempt_errors,
+                        "response_preview": response.text[:300],
+                    },
                 )
             
             # Check if response is JSON
@@ -140,14 +303,138 @@ async def proxy_n8n_resume_upload(
     except httpx.HTTPStatusError as e:
         print(f"❌ HTTP Error: {e}")
         raise HTTPException(status_code=e.response.status_code, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"❌ Proxy Error: {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Proxy Error: {str(e)}")
 
+
+@router.post("/start-screening-proxy")
+async def proxy_start_screening(jobId: str = Form(...)):
+    """Proxy screening trigger through FastAPI and fallback to schedule webhook when needed."""
+    N8N_SCREEN_URL = os.environ.get("N8N_START_SCREENING_WEBHOOK", "http://localhost:5678/webhook/start-screening")
+    N8N_SCHEDULE_URL = (
+        os.environ.get("N8N_SCHEDULE_WEBHOOK")
+        or os.environ.get("N8N_SCHEDULE_WEBHOOK_URL")
+        or "http://localhost:5678/webhook/schedule-interviews"
+    )
+    webhook_candidates = _candidate_webhook_urls(N8N_SCREEN_URL)
+    for url in _candidate_webhook_urls(N8N_SCHEDULE_URL):
+        if url not in webhook_candidates:
+            webhook_candidates.append(url)
+
+    print(f"\n{'='*60}")
+    print(f"🚀 PROXY REQUEST TO N8N START SCREENING")
+    print(f"{'='*60}")
+    print(f"Job ID: {jobId}")
+    print(f"Target URL: {N8N_SCREEN_URL}")
+    print(f"Candidates: {webhook_candidates}")
+
+    try:
+        shortlisted_candidates = []
+        conn = get_db_connection()
+        try:
+            from psycopg2.extras import RealDictCursor
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT candidate_name, email, phone, skills, ai_score
+                    FROM resume_data
+                    WHERE job_id = %s AND ai_score >= 35
+                    ORDER BY ai_score DESC;
+                    """,
+                    (jobId,),
+                )
+                rows = cur.fetchall() or []
+                for row in rows:
+                    skills = row.get("skills")
+                    if isinstance(skills, str):
+                        skills_text = skills
+                    elif skills is None:
+                        skills_text = ""
+                    else:
+                        skills_text = str(skills)
+
+                    shortlisted_candidates.append(
+                        {
+                            "candidate_name": row.get("candidate_name") or "Candidate",
+                            "email": row.get("email") or "",
+                            "phone": row.get("phone") or "",
+                            "skills": skills_text,
+                            "score": float(row.get("ai_score") or 0),
+                            "shortlisted": True,
+                        }
+                    )
+        finally:
+            conn.close()
+
+        payload = {
+            "jobId": jobId,
+            "job_id": jobId,
+            "shortlisted_candidates": shortlisted_candidates,
+        }
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = None
+            attempt_errors = []
+            for webhook_url in webhook_candidates:
+                try:
+                    response = await client.post(webhook_url, json=payload)
+                    print(f"Tried: {webhook_url} -> {response.status_code}")
+                    if response.status_code < 400:
+                        break
+                    attempt_errors.append(f"{webhook_url} -> HTTP {response.status_code}")
+                except Exception as req_exc:
+                    attempt_errors.append(f"{webhook_url} -> {str(req_exc)}")
+
+            if response is None:
+                return {
+                    "success": False,
+                    "message": "No screening webhook reachable; trigger skipped",
+                    "job_id": jobId,
+                    "shortlisted_candidates": len(shortlisted_candidates),
+                    "attempts": attempt_errors,
+                }
+
+            print(f"✅ Screening trigger response status: {response.status_code}")
+            print(f"Response preview: {response.text[:500]}")
+
+            if response.status_code >= 400:
+                return {
+                    "success": False,
+                    "message": "Screening webhook returned an error; trigger skipped",
+                    "job_id": jobId,
+                    "shortlisted_candidates": len(shortlisted_candidates),
+                    "attempts": attempt_errors,
+                    "response_preview": response.text[:300],
+                }
+
+            if "application/json" in response.headers.get("content-type", ""):
+                try:
+                    return response.json()
+                except Exception:
+                    pass
+
+            return {
+                "success": True,
+                "message": "Screening triggered successfully",
+                "status_code": response.status_code,
+                "raw_response": response.text[:200],
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Screening proxy error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Proxy Error: {str(e)}")
+
 @router.post("/batch-screen")
 async def batch_screen_resumes(
+    background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     jobId: str = Form(...)
 ):
@@ -234,7 +521,7 @@ async def batch_screen_resumes(
             for idx, result in enumerate(scored_results):
                 # Check if candidate already exists for this job
                 cur.execute("""
-                    SELECT id FROM resume_data 
+                    SELECT id, email_sent FROM resume_data 
                     WHERE job_id = %s AND email = %s;
                 """, (jobId, result['email']))
                 existing_resume = cur.fetchone()
@@ -259,6 +546,7 @@ async def batch_screen_resumes(
                         existing_resume['id']
                     ))
                     resume_data_id = cur.fetchone()['id']
+                    email_sent = bool(existing_resume.get('email_sent'))
                 else:
                     print(f"  ✓ Adding new candidate: {result['candidate_name']} ({result['email']})")
                     
@@ -299,6 +587,7 @@ async def batch_screen_resumes(
                         f"Match Score: {result['score']:.1f}/100"
                     ))
                     resume_data_id = cur.fetchone()['id']
+                    email_sent = False
                 
                 # 3. Save to candidates (workflow tracking)
                 cur.execute("""
@@ -331,15 +620,27 @@ async def batch_screen_resumes(
                     'skills': ', '.join(result['skills']) if isinstance(result['skills'], list) else result['skills'],
                     'score': result['score'],
                     'shortlisted': result['shortlisted'],
-                    'threshold': result['threshold']
+                    'threshold': result['threshold'],
+                    'email_sent': email_sent,
                 })
             
             conn.commit()
-        
-        print(f"✅ Saved {len(saved_candidates)} candidates")
-        
-        # Auto-trigger interview scheduling for shortlisted candidates
+
         shortlisted = [c for c in saved_candidates if c['shortlisted']]
+
+        for candidate in shortlisted:
+            if candidate.get('email_sent'):
+                continue
+            background_tasks.add_task(
+                _send_shortlisted_resume_email,
+                candidate['resume_data_id'],
+                candidate['candidate_name'],
+                candidate['email'],
+            )
+
+        print(f"✅ Saved {len(saved_candidates)} candidates")
+
+        # Auto-trigger interview scheduling for shortlisted candidates
         if shortlisted:
             print(f"\n📅 Auto-triggering interview scheduling for {len(shortlisted)} shortlisted candidates...")
             
@@ -358,14 +659,47 @@ async def batch_screen_resumes(
                 
                 try:
                     import requests
-                    N8N_SCHEDULE_URL = os.environ.get("N8N_SCHEDULE_WEBHOOK", "http://localhost:5678/webhook/schedule-interviews")
-                    response = requests.post(N8N_SCHEDULE_URL, json={
-                        'job_id': jobId,
-                        'shortlisted_candidates': candidates_to_schedule
-                    }, timeout=30.0)
-                    print(f"✅ Interview scheduling triggered: {response.status_code}")
+                    N8N_SCHEDULE_URL = (
+                        os.environ.get("N8N_SCHEDULE_WEBHOOK")
+                        or os.environ.get("N8N_SCHEDULE_WEBHOOK_URL")
+                        or "http://localhost:5678/webhook/schedule-interviews"
+                    )
+                    schedule_candidates = _candidate_webhook_urls(N8N_SCHEDULE_URL)
+                    response = None
+                    schedule_errors = []
+
+                    for schedule_url in schedule_candidates:
+                        try:
+                            response = requests.post(
+                                schedule_url,
+                                json={
+                                    'job_id': jobId,
+                                    'shortlisted_candidates': candidates_to_schedule
+                                },
+                                timeout=30.0,
+                            )
+                            print(f"Tried schedule webhook: {schedule_url} -> {response.status_code}")
+                            if response.status_code < 400:
+                                break
+                            schedule_errors.append(f"{schedule_url} -> HTTP {response.status_code}")
+                        except Exception as req_exc:
+                            schedule_errors.append(f"{schedule_url} -> {str(req_exc)}")
+
+                    if response is None or response.status_code >= 400:
+                        print(f"⚠️ Interview scheduling trigger failed after retries: {schedule_errors}")
+                    else:
+                        print(f"✅ Interview scheduling triggered: {response.status_code}")
+                        log_phase_completion(
+                            "Interview Scheduling",
+                            f"source=batch_screen job_id={jobId} candidates={len(candidates_to_schedule)}",
+                        )
                 except Exception as e:
                     print(f"⚠️ Interview scheduling trigger failed (non-critical): {e}")
+
+        log_phase_completion(
+            "Resume Screening",
+            f"job_id={jobId} processed={len(saved_candidates)} shortlisted={len(shortlisted)}",
+        )
         
         print(f"{'='*60}\n")
         
@@ -403,29 +737,28 @@ def get_screening_results(job_id: str):
         from psycopg2.extras import RealDictCursor
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                SELECT DISTINCT ON (email)
-                    id, job_id, candidate_name, email, phone,
+                SELECT id, job_id, candidate_name, email, phone,
                     skills, ai_score, interview_status,
                     resume_url, created_at
                 FROM resume_data
                 WHERE job_id = %s
-                ORDER BY email, ai_score DESC NULLS LAST;
+                ORDER BY ai_score DESC NULLS LAST, created_at DESC;
             """, (job_id,))
             rows = cur.fetchall()
 
-        # Sort by score descending after dedup
-        rows = sorted(rows, key=lambda r: float(r["ai_score"] or 0), reverse=True)
-
         results = []
+        THRESHOLD = 35.0  # Shortlisting threshold in percentage
         for r in rows:
+            score = float(r["ai_score"] or 0)
+            is_shortlisted = score >= THRESHOLD
             results.append({
                 "candidate_name": r["candidate_name"] or "",
                 "email": r["email"] or "",
                 "phone": r["phone"] or "",
                 "skills": r["skills"] or "",
-                "match_score": float(r["ai_score"] or 0),
+                "match_score": score,
                 "file_name": r["resume_url"] or "",   # resume_url used as display name
-                "status": r["interview_status"] or "PENDING",
+                "status": "SHORTLISTED" if is_shortlisted else "DECLINED",
                 "ai_summary": "",                      # column may not exist in older DBs
             })
 

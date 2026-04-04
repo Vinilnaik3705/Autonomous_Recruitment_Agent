@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 
 from backend.database import get_db_connection
+from backend.phase_logger import log_phase_completion
 from backend.routers.email_router import (
     OACompletionRequest,
     get_oa_completion_thank_you_email,
@@ -633,6 +634,11 @@ def _process_oa_result(
                 resolved_score,
             )
 
+            log_phase_completion(
+                "OA Completion",
+                f"candidate={submission.candidate_email} score={resolved_score}/10",
+            )
+
             background_tasks.add_task(
                 send_oa_completion_thank_you_email,
                 candidate_email=submission.candidate_email,
@@ -647,6 +653,13 @@ def _process_oa_result(
                     candidate_email=submission.candidate_email,
                     candidate_name=candidate_name,
                     score=resolved_score,
+                )
+                log_phase_completion(
+                    "Interview Scheduling",
+                    (
+                        "source=oa_completion "
+                        f"candidate={submission.candidate_email} score={resolved_score}/10"
+                    ),
                 )
 
             return OAResultResponse(

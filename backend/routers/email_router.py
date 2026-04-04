@@ -1,3 +1,4 @@
+# v3: added send-shortlist, send-brevo endpoints
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Tuple
@@ -43,6 +44,10 @@ class EmailRequest(BaseModel):
     # (e.g. Reminder Trigger fires every 15 min but no interviews are scheduled)
     candidate_email: Optional[str] = None
     candidate_name: Optional[str] = None
+    email: Optional[str] = None
+    name: Optional[str] = None
+    interviewer_email: Optional[str] = None
+    interviewer_name: Optional[str] = None
     # Extended fields for richer templates
     round_number: Optional[int] = 1
     round_label: Optional[str] = "Interview"
@@ -101,6 +106,26 @@ def _skip_response():
         "recipient_name": "none",
         "skipped": True
     }
+
+
+def _normalize_email(*values: Optional[str]) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text.lower()
+    return ""
+
+
+def _normalize_name(*values: Optional[str], default: str = "Candidate") -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return default
 
 
 def _build_oa_launch_link(raw_oa_link: str, candidate_email: str, candidate_name: str) -> str:
@@ -195,7 +220,10 @@ def get_oa_original_email(req: EmailRequest):
 
 @router.post("/resume-shortlisted", response_model=EmailResponse)
 def get_resume_shortlisted_email(req: EmailRequest):
-    if not req.candidate_email or not req.candidate_name:
+    candidate_email = _normalize_email(req.candidate_email, req.email)
+    candidate_name = _normalize_name(req.candidate_name, req.name)
+
+    if not candidate_email or not candidate_name:
         return _skip_response()
 
     oa_link = (
@@ -204,7 +232,7 @@ def get_resume_shortlisted_email(req: EmailRequest):
         or os.getenv("DEFAULT_OA_LINK")
         or "https://hackerrank.com/sample-test"
     )
-    tracked_oa_link = _build_oa_launch_link(oa_link, req.candidate_email, req.candidate_name)
+    tracked_oa_link = _build_oa_launch_link(oa_link, candidate_email, candidate_name)
     
     # Professional HTML email template
     html_body = f"""
@@ -226,7 +254,7 @@ def get_resume_shortlisted_email(req: EmailRequest):
                 <h1>🎉 Congratulations!</h1>
             </div>
             <div class="content">
-                <p>Dear <strong>{req.candidate_name}</strong>,</p>
+                <p>Dear <strong>{candidate_name}</strong>,</p>
                 
                 <p>We are pleased to inform you that your resume has been <strong>shortlisted</strong> for further consideration.</p>
                 
@@ -263,35 +291,44 @@ def get_resume_shortlisted_email(req: EmailRequest):
     return {
         "subject": "🎉 Your Resume Has Been Shortlisted!",
         "body": html_body,
-        "recipient_email": req.candidate_email,
-        "recipient_name": req.candidate_name
+        "recipient_email": candidate_email,
+        "recipient_name": candidate_name
     }
 
 @router.post("/oa-shortlisted", response_model=EmailResponse)
 def get_oa_shortlisted_email(req: EmailRequest):
-    if not req.candidate_email or not req.candidate_name:
+    candidate_email = _normalize_email(req.candidate_email, req.email)
+    candidate_name = _normalize_name(req.candidate_name, req.name)
+
+    if not candidate_email or not candidate_name:
         return _skip_response()
     return {
         "subject": "Congratulations! You are Shortlisted",
         "body": "Dear Candidate,\n\nWe are pleased to inform you that you have been shortlisted for the next round.\n\nBest,\nRecruiting Team",
-        "recipient_email": req.candidate_email,
-        "recipient_name": req.candidate_name
+        "recipient_email": candidate_email,
+        "recipient_name": candidate_name
     }
 
 @router.post("/interview-confirm", response_model=EmailResponse)
 def get_interview_confirm_email(req: EmailRequest):
-    if not req.candidate_email or not req.candidate_name:
+    candidate_email = _normalize_email(req.candidate_email, req.email)
+    candidate_name = _normalize_name(req.candidate_name, req.name)
+
+    if not candidate_email or not candidate_name:
         return _skip_response()
     return {
         "subject": "Interview Confirmation",
         "body": "Dear Candidate,\n\nYour interview has been confirmed. Please check the details in your calendar invitation.\n\nBest,\nRecruiting Team",
-        "recipient_email": req.candidate_email,
-        "recipient_name": req.candidate_name
+        "recipient_email": candidate_email,
+        "recipient_name": candidate_name
     }
 
 @router.post("/interview-reminder", response_model=EmailResponse)
 def get_interview_reminder_email(req: EmailRequest):
-    if not req.candidate_email or not req.candidate_name:
+    candidate_email = _normalize_email(req.candidate_email, req.email)
+    candidate_name = _normalize_name(req.candidate_name, req.name)
+
+    if not candidate_email or not candidate_name:
         return {
             "subject": "SKIPPED",
             "body": "No candidate data — empty Postgres result",
@@ -302,41 +339,30 @@ def get_interview_reminder_email(req: EmailRequest):
     return {
         "subject": "Interview Reminder",
         "body": "Dear Candidate,\n\nThis is a reminder for your upcoming interview tomorrow.\n\nBest,\nRecruiting Team",
-        "recipient_email": req.candidate_email,
-        "recipient_name": req.candidate_name
+        "recipient_email": candidate_email,
+        "recipient_name": candidate_name
     }
 
 @router.post("/interview-invite", response_model=EmailResponse)
 def get_interview_invite_email(req: EmailRequest):
-    if not req.candidate_email or not req.candidate_name:
+    candidate_email = _normalize_email(req.candidate_email, req.email)
+    candidate_name = _normalize_name(req.candidate_name, req.name)
+    interviewer_email = _normalize_email(req.interviewer_email)
+    interviewer_name = _normalize_name(req.interviewer_name, "HR Team")
+
+    if not candidate_name:
+        return _skip_response()
+
+    # Interview invite must go to interviewer/workspace inbox, not candidate inbox.
+    if not interviewer_email:
+        interviewer_email = _normalize_email(os.getenv("WORKSPACE_EMAIL"), "workspace3705@gmail.com")
+    if not interviewer_email:
         return _skip_response()
 
     round_number = req.round_number or 1
     round_label = req.round_label or "Interview"
     interview_format = req.interview_format or "video call"
     scheduled_time = _format_scheduled_time_for_email(req.scheduled_time, req.timezone)
-    if req.feedback_form_url:
-        base_feedback_url = req.feedback_form_url
-    else:
-        public_base = (os.getenv("PUBLIC_API_BASE_URL") or "http://localhost:8000").rstrip("/")
-        base_feedback_url = f"{public_base}/feedback-form.html"
-
-    feedback_query = {}
-    if req.interview_id is not None:
-        feedback_query["interview_id"] = req.interview_id
-    if req.candidate_name:
-        feedback_query["candidate"] = req.candidate_name
-    if req.candidate_email:
-        feedback_query["candidate_email"] = req.candidate_email
-    if round_label:
-        feedback_query["job"] = round_label
-
-    feedback_form_url = (
-        f"{base_feedback_url}?{urlencode(feedback_query)}"
-        if feedback_query
-        else base_feedback_url
-    )
-
     meeting_section = (
         f'<p><strong>Meeting Link:</strong> <a href="{req.meeting_link}">{req.meeting_link}</a></p>'
         if req.meeting_link
@@ -355,24 +381,27 @@ def get_interview_invite_email(req: EmailRequest):
     <!DOCTYPE html><html><body style="font-family:Arial,sans-serif;color:#333;">
     <div style="max-width:600px;margin:auto;padding:20px;">
       <div style="background:linear-gradient(135deg,#667eea,#764ba2);color:white;padding:30px;border-radius:10px 10px 0 0;text-align:center;">
-        <h1>You're Invited to Interview!</h1>
-        <p style="font-size:18px;opacity:0.9;">Round {round_number}: {round_label}</p>
+                <h1>Interview Scheduled</h1>
+                <p style="font-size:18px;opacity:0.9;">Round {round_number}: {round_label}</p>
       </div>
       <div style="background:#f9fafb;padding:30px;border-radius:0 0 10px 10px;">
-        <p>Dear <strong>{req.candidate_name}</strong>,</p>
-        <p>We are pleased to invite you to <strong>Round {round_number} – {round_label}</strong> of
-           our interview process!</p>
+                <p>Hi <strong>{interviewer_name}</strong>,</p>
+                <p>An interview has been scheduled and assigned to you.</p>
 
         <table style="width:100%;border-collapse:collapse;margin:16px 0;">
           <tr style="background:#edf2f7;">
+                        <td style="padding:8px 12px;font-weight:bold;">Candidate</td>
+                        <td style="padding:8px 12px;">{candidate_name}{' (' + candidate_email + ')' if candidate_email else ''}</td>
+                    </tr>
+                    <tr>
             <td style="padding:8px 12px;font-weight:bold;">Format</td>
             <td style="padding:8px 12px;">{interview_format.title()}</td>
           </tr>
-          <tr>
+                    <tr style="background:#edf2f7;">
             <td style="padding:8px 12px;font-weight:bold;">Confirmed Time</td>
             <td style="padding:8px 12px;">{scheduled_time}</td>
           </tr>
-          <tr style="background:#edf2f7;">
+                    <tr>
             <td style="padding:8px 12px;font-weight:bold;">Duration</td>
             <td style="padding:8px 12px;">~60 minutes</td>
           </tr>
@@ -381,40 +410,19 @@ def get_interview_invite_email(req: EmailRequest):
         {slots_html}
         {meeting_section}
 
-                <div style="margin:18px 0;padding:14px;background:#eef2ff;border-left:4px solid #4f46e5;border-radius:6px;">
-                    <strong>Interviewer Scorecard:</strong>
-                    Please submit interview feedback after the session.
-                    <br><br>
-                    <a href="{feedback_form_url}" style="display:inline-block;padding:10px 16px;background:#4f46e5;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">
-                        Submit Feedback Scorecard
-                    </a>
-                </div>
-
-        <h3 style="color:#4a5568;">What to Expect</h3>
+                <h3 style="color:#4a5568;">Interviewer Notes</h3>
         <ul>
-          <li>Discussion of your background and relevant experience</li>
-          <li>Technical / competency-based questions aligned to the role</li>
-          <li>A chance for you to ask questions about the team and company</li>
+                    <li>Review candidate profile and role requirements before the call</li>
+                    <li>Cover technical / competency-based questions aligned to the role</li>
+                    <li>Submit feedback after the interview via the scorecard link</li>
         </ul>
 
         <div style="background:#ebf8ff;border-left:4px solid #4299e1;padding:12px;margin:16px 0;border-radius:4px;">
-          <strong>Need to reschedule?</strong> Please reply to this email at least 24 hours in advance
-          and we will do our best to accommodate you.
+                    <strong>Need to reschedule?</strong> Please coordinate with HR and update the calendar event.
         </div>
 
-                <div style="margin:20px 0;padding:16px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;text-align:center;">
-                    <p style="margin:0 0 10px 0;"><strong>Post-Interview Action</strong></p>
-                    <p style="margin:0 0 14px 0;">After the interview, please submit the feedback scorecard.</p>
-                    <a href="{feedback_form_url}" style="display:inline-block;padding:12px 20px;background:#059669;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:bold;">
-                        Submit Feedback
-                    </a>
-                    <p style="margin:12px 0 0 0;font-size:12px;color:#4b5563;">
-                        If the button does not open, use this link: <a href="{feedback_form_url}">{feedback_form_url}</a>
-                    </p>
-                </div>
-
-        <p>We look forward to speaking with you!</p>
-        <br><p>Best regards,<br><strong>HR Recruiting Team</strong></p>
+                <p>Thank you.</p>
+                <br><p>Best regards,<br><strong>HR Recruiting Team</strong></p>
       </div>
       <p style="text-align:center;font-size:12px;color:#888;margin-top:20px;">
         This is an automated email from our recruitment system.
@@ -424,10 +432,10 @@ def get_interview_invite_email(req: EmailRequest):
     """
 
     return {
-        "subject": f"Interview Invitation – Round {round_number}: {round_label}",
+        "subject": f"Interview Scheduled – Round {round_number}: {round_label} ({candidate_name})",
         "body": html_body,
-        "recipient_email": req.candidate_email,
-        "recipient_name": req.candidate_name,
+        "recipient_email": interviewer_email,
+        "recipient_name": interviewer_name,
     }
 
 
@@ -978,7 +986,12 @@ def _send_email_via_brevo(
         )
         if 200 <= response.status_code < 300:
             return True, "Email sent successfully via Brevo"
-        return False, f"Brevo send failed ({response.status_code}): {response.text[:300]}"
+        detail = response.text[:500]
+        try:
+            detail = str(response.json())
+        except Exception:
+            pass
+        return False, f"Brevo send failed ({response.status_code}): {detail[:500]}"
     except Exception as exc:
         return False, f"Brevo send failed: {str(exc)}"
 
@@ -1037,6 +1050,7 @@ def send_email_via_smtp(
         return True, "Email sent successfully"
     except Exception as smtp_error:
         if brevo_api_key:
+            print(f"SMTP send failed, falling back to Brevo: {smtp_error}")
             return _send_email_via_brevo(
                 recipient_email=recipient_email,
                 recipient_name=recipient_name,
@@ -1069,3 +1083,179 @@ def send_email(req: SendEmailRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Email error: {str(e)}")
+
+
+# ── Combined generate + send endpoints (for n8n workflow) ─────────────────────
+
+class BrevoSendRequest(BaseModel):
+    """Request model for sending email via Brevo.
+    Accepts brevo_api_key and sender_email so n8n can pass its own credentials."""
+    candidate_email: Optional[str] = None
+    candidate_name: Optional[str] = None
+    email: Optional[str] = None
+    name: Optional[str] = None
+    brevo_api_key: Optional[str] = None
+    sender_email: Optional[str] = None
+    sender_name: Optional[str] = "HR Recruitment Team"
+    # For generic send-brevo
+    subject: Optional[str] = None
+    body: Optional[str] = None
+
+
+@router.post("/send-shortlist")
+def send_shortlist_email(req: BrevoSendRequest):
+    """Generate the resume-shortlisted email AND send it via Brevo in one call.
+
+    n8n should call this instead of two separate nodes (generate + Brevo HTTP).
+    Pass brevo_api_key and sender_email in the request body.
+    """
+    candidate_email = _normalize_email(
+        req.candidate_email, req.email
+    )
+    candidate_name = _normalize_name(
+        req.candidate_name, req.name
+    )
+
+    if not candidate_email or not candidate_name:
+        return {
+            "success": False,
+            "message": "Skipped – no candidate data",
+            "skipped": True,
+            "recipient_email": "none",
+            "recipient_name": "none",
+        }
+
+    # 1. Generate the email content using the existing template function
+    email_req = EmailRequest(
+        candidate_email=candidate_email,
+        candidate_name=candidate_name,
+    )
+    template = get_resume_shortlisted_email(email_req)
+    if template.get("skipped"):
+        return {
+            "success": False,
+            "message": "Skipped – template returned skip",
+            "skipped": True,
+            "recipient_email": "none",
+            "recipient_name": "none",
+        }
+
+    # 2. Resolve Brevo credentials (request > env > secrets.toml)
+    brevo_api_key = (
+        req.brevo_api_key
+        or os.getenv("BREVO_API_KEY")
+        or get_smtp_config().get("brevo_api_key", "")
+    )
+    sender_email = (
+        req.sender_email
+        or os.getenv("BREVO_SENDER_EMAIL")
+        or get_smtp_config().get("sender_email", "")
+    )
+    sender_name = req.sender_name or "HR Recruitment Team"
+
+    # Reject placeholder key
+    if not brevo_api_key or brevo_api_key == "your-real-brevo-api-key-here":
+        return {
+            "success": False,
+            "message": "Brevo API key is not configured. Update secrets.toml or pass brevo_api_key in the request.",
+            "recipient_email": candidate_email,
+            "recipient_name": candidate_name,
+        }
+
+    if not sender_email:
+        return {
+            "success": False,
+            "message": "Sender email is not configured. Set BREVO_SENDER_EMAIL env var or pass sender_email in the request.",
+            "recipient_email": candidate_email,
+            "recipient_name": candidate_name,
+        }
+
+    # 3. Send via Brevo with correct payload format
+    print(f"📧 Sending shortlist email to {candidate_email} via Brevo...")
+    success, message = _send_email_via_brevo(
+        recipient_email=template["recipient_email"],
+        recipient_name=template.get("recipient_name", candidate_name),
+        subject=template["subject"],
+        body=template["body"],
+        is_html=True,
+        sender_email=sender_email,
+        sender_name=sender_name,
+        brevo_api_key=brevo_api_key,
+    )
+
+    if success:
+        print(f"✅ Shortlist email sent to {candidate_email}")
+    else:
+        print(f"❌ Shortlist email failed for {candidate_email}: {message}")
+
+    return {
+        "success": success,
+        "message": message,
+        "recipient_email": template["recipient_email"],
+        "recipient_name": template.get("recipient_name", candidate_name),
+        "subject": template["subject"],
+    }
+
+
+@router.post("/send-brevo")
+def send_via_brevo(req: BrevoSendRequest):
+    """Send any pre-built email via Brevo.
+
+    n8n can call this after generating email content from another endpoint.
+    Pass brevo_api_key, sender_email, subject, body, recipient info.
+    """
+    candidate_email = _normalize_email(req.candidate_email, req.email)
+    candidate_name = _normalize_name(req.candidate_name, req.name)
+
+    if not candidate_email or not req.subject or not req.body:
+        return {
+            "success": False,
+            "message": "Missing required fields: candidate_email, subject, body",
+            "recipient_email": candidate_email or "none",
+        }
+
+    brevo_api_key = (
+        req.brevo_api_key
+        or os.getenv("BREVO_API_KEY")
+        or get_smtp_config().get("brevo_api_key", "")
+    )
+    sender_email = (
+        req.sender_email
+        or os.getenv("BREVO_SENDER_EMAIL")
+        or get_smtp_config().get("sender_email", "")
+    )
+    sender_name = req.sender_name or "HR Recruitment Team"
+
+    if not brevo_api_key or brevo_api_key == "your-real-brevo-api-key-here":
+        return {
+            "success": False,
+            "message": "Brevo API key is not configured.",
+            "recipient_email": candidate_email,
+        }
+
+    if not sender_email:
+        return {
+            "success": False,
+            "message": "Sender email is not configured.",
+            "recipient_email": candidate_email,
+        }
+
+    is_html = "<html" in req.body.lower()
+
+    print(f"📧 Sending email to {candidate_email} via Brevo...")
+    success, message = _send_email_via_brevo(
+        recipient_email=candidate_email,
+        recipient_name=candidate_name,
+        subject=req.subject,
+        body=req.body,
+        is_html=is_html,
+        sender_email=sender_email,
+        sender_name=sender_name,
+        brevo_api_key=brevo_api_key,
+    )
+
+    return {
+        "success": success,
+        "message": message,
+        "recipient_email": candidate_email,
+    }

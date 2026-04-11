@@ -105,6 +105,54 @@ def _apply_schema_hotfixes(cur):
         """
     )
 
+    # Enforce one active interview per candidate email.
+    # 1) Cancel legacy duplicates while keeping the earliest active record.
+    cur.execute(
+        """
+        WITH ranked AS (
+            SELECT
+                id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY LOWER(TRIM(candidate_email))
+                    ORDER BY scheduled_time ASC NULLS LAST, created_at ASC
+                ) AS rn
+            FROM interview_schedules
+            WHERE candidate_email IS NOT NULL
+              AND TRIM(candidate_email) <> ''
+              AND status IN ('scheduled', 'in_progress')
+        )
+        UPDATE interview_schedules s
+        SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+        FROM ranked r
+        WHERE s.id = r.id
+          AND r.rn > 1
+        """
+    )
+
+    # 2) Add a unique partial index so DB rejects any second active row.
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_indexes
+                WHERE schemaname = 'public'
+                  AND indexname = 'idx_unique_active_interview_per_candidate'
+            ) THEN
+                CREATE UNIQUE INDEX idx_unique_active_interview_per_candidate
+                ON interview_schedules ((LOWER(TRIM(candidate_email))))
+                WHERE status IN ('scheduled', 'in_progress')
+                  AND candidate_email IS NOT NULL
+                  AND TRIM(candidate_email) <> '';
+            END IF;
+        EXCEPTION
+            WHEN others THEN
+                RAISE NOTICE 'Skipping idx_unique_active_interview_per_candidate: %', SQLERRM;
+        END $$;
+        """
+    )
+
     cur.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_resume_data_sample_oa_window

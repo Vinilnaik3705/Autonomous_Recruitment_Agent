@@ -59,6 +59,9 @@ class EmailRequest(BaseModel):
     oa_link: Optional[str] = None
     feedback_form_url: Optional[str] = None
     timezone: Optional[str] = None
+    role: Optional[str] = None
+    job_title: Optional[str] = None
+    position: Optional[str] = None
 
 
 def _format_scheduled_time_for_email(raw_scheduled_time: Optional[str], tz_name: Optional[str] = None) -> str:
@@ -222,6 +225,7 @@ def get_oa_original_email(req: EmailRequest):
 def get_resume_shortlisted_email(req: EmailRequest):
     candidate_email = _normalize_email(req.candidate_email, req.email)
     candidate_name = _normalize_name(req.candidate_name, req.name)
+    role_name = (req.role or req.job_title or req.position or "the applied role").strip()
 
     if not candidate_email or not candidate_name:
         return _skip_response()
@@ -257,6 +261,7 @@ def get_resume_shortlisted_email(req: EmailRequest):
                 <p>Dear <strong>{candidate_name}</strong>,</p>
                 
                 <p>We are pleased to inform you that your resume has been <strong>shortlisted</strong> for further consideration.</p>
+                <p><strong>Role:</strong> {role_name}</p>
                 
                 <p>Your skills and experience align well with our requirements, and we would like to proceed to the next step of our hiring process.</p>
                 
@@ -289,7 +294,7 @@ def get_resume_shortlisted_email(req: EmailRequest):
     """
     
     return {
-        "subject": "🎉 Your Resume Has Been Shortlisted!",
+        "subject": f"Your Resume Has Been Shortlisted - {role_name}",
         "body": html_body,
         "recipient_email": candidate_email,
         "recipient_name": candidate_name
@@ -587,8 +592,8 @@ def get_rejection_email(req: EmailRequest):
 class NextRoundRequest(BaseModel):
     candidate_email: Optional[str] = None
     candidate_name: Optional[str] = None
-    next_round_number: int = 2
-    next_round_label: str = "Technical Round"
+    next_round_number: int = 1
+    next_round_label: str = "HR Round"
 
 @router.post("/next-round", response_model=EmailResponse)
 def get_next_round_email(req: NextRoundRequest):
@@ -642,39 +647,45 @@ def get_offer_letter_email(req: OfferLetterRequest):
         return _skip_response()
 
     sign_section = (
-        f'<p><a href="{req.offer_link}" style="display:inline-block;padding:14px 30px;'
-        f'background:#667eea;color:white;border-radius:5px;text-decoration:none;font-weight:bold;">'
-        f'Review &amp; Sign Offer Letter</a></p>'
-        if req.offer_link
-        else "<p>Our team will send you the formal offer letter document within 1–2 business days.</p>"
+                f'<div style="margin-top:28px;margin-bottom:24px;">'
+                f'<a href="{req.offer_link}" style="display:inline-block;padding:14px 26px;'
+                f'background:#0f766e;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;">'
+                f'Review and Sign Offer Letter</a></div>'
+                if req.offer_link
+                else "<p style=\"margin:24px 0 0;\">Our team will share the formal offer letter document shortly.</p>"
     )
 
     html_body = f"""
-    <!DOCTYPE html><html><body style="font-family:Arial,sans-serif;color:#333;">
-    <div style="max-width:600px;margin:auto;padding:20px;">
-      <div style="background:linear-gradient(135deg,#ed8936,#c05621);color:white;padding:30px;
-                  border-radius:10px 10px 0 0;text-align:center;">
-        <h1>🌟 Offer Letter</h1>
-      </div>
-      <div style="background:#f9fafb;padding:30px;border-radius:0 0 10px 10px;">
-        <p>Dear <strong>{req.candidate_name}</strong>,</p>
-        <p>We are thrilled to extend a formal offer of employment for the role of
-           <strong>{req.role}</strong>. After a thorough process you have truly stood out
-           and we are excited about the prospect of you joining our team.</p>
-        <p>Please review the offer letter and sign electronically at your earliest convenience
-           (we kindly ask for a response within <strong>5 business days</strong>).</p>
-        {sign_section}
-        <p>If you have any questions about the offer, compensation, or start date, please
-           don't hesitate to reply to this email.</p>
-        <p>We look forward to welcoming you aboard!</p>
-        <br><p>Warm regards,<br><strong>HR Recruiting Team</strong></p>
-      </div>
-    </div>
-    </body></html>
+        <!DOCTYPE html>
+        <html>
+            <body style="margin:0;padding:0;background:#f5f7fb;font-family:Arial,Helvetica,sans-serif;color:#1f2937;">
+                <div style="max-width:720px;margin:0 auto;padding:32px 20px;">
+                    <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden;box-shadow:0 10px 30px rgba(15,23,42,0.08);">
+                        <div style="padding:28px 32px 18px;border-bottom:1px solid #e5e7eb;text-align:center;">
+                            <div style="font-size:12px;letter-spacing:0.14em;text-transform:uppercase;color:#0f766e;font-weight:700;">Offer Letter</div>
+                            <h1 style="margin:10px 0 0;font-size:28px;line-height:1.2;color:#111827;">Job Offer from HR Recruiting Team</h1>
+                        </div>
+                        <div style="padding:32px;line-height:1.7;font-size:15px;">
+                            <p style="margin:0 0 18px;">Dear <strong>{req.candidate_name}</strong>,</p>
+                            <p style="margin:0 0 18px;">We are pleased to extend a formal offer for the position of <strong>{req.role}</strong> with our team.</p>
+                            <div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:12px;padding:18px 20px;margin:0 0 22px;">
+                                <p style="margin:0 0 8px;"><strong>Candidate:</strong> {req.candidate_name}</p>
+                                <p style="margin:0 0 8px;"><strong>Role:</strong> {req.role}</p>
+                                <p style="margin:0;"><strong>Action Required:</strong> Please review the offer and sign electronically at your earliest convenience, ideally within 5 business days.</p>
+                            </div>
+                            <p style="margin:0 0 18px;">If you have any questions about the role, compensation, or next steps, please reply to this email and our HR team will assist you.</p>
+                            <p style="margin:0 0 4px;">We look forward to welcoming you to the team.</p>
+                            <p style="margin:0;">Best regards,<br><strong>HR Recruiting Team</strong></p>
+                            {sign_section}
+                        </div>
+                    </div>
+                </div>
+            </body>
+        </html>
     """
 
     return {
-        "subject": f"🌟 Your Offer Letter – {req.role}",
+                "subject": f"Offer Letter - {req.role}",
         "body": html_body,
         "recipient_email": req.candidate_email,
         "recipient_name": req.candidate_name,

@@ -145,7 +145,7 @@ const InterviewStatus = () => {
     setClearing(true);
     try {
       await clearAllInterviews();
-      await fetchStatus();
+      await fetchStatus(true);
     } catch (err) {
       alert('Failed to clear: ' + err.message);
     } finally {
@@ -153,10 +153,10 @@ const InterviewStatus = () => {
     }
   };
 
-  const fetchStatus = async () => {
+  const fetchStatus = async (forceFresh = false) => {
     try {
       setLoading(true);
-      const data = await getInterviewStatus();
+      const data = await getInterviewStatus(forceFresh);
       setStatus(data);
       setLastRefresh(new Date());
       setError(null);
@@ -168,8 +168,8 @@ const InterviewStatus = () => {
   };
 
   useEffect(() => {
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 30000);
+    fetchStatus(true);
+    const interval = setInterval(() => fetchStatus(true), 30000);
     return () => clearInterval(interval);
   }, []);
 
@@ -230,6 +230,8 @@ const InterviewStatus = () => {
   const scheduled = status.scheduled || [];
   const in_progress = status.in_progress || [];
   const completed = status.completed || [];
+  const allInterviews = status.all_interviews || [];
+  const hasBucketedRows = scheduled.length > 0 || in_progress.length > 0 || completed.length > 0;
 
   return (
     <div className="space-y-6">
@@ -415,6 +417,55 @@ const InterviewStatus = () => {
                         </td>
                         <td className="px-5 py-4"><StarRating rating={iv.overall_rating} /></td>
                         <td className="px-5 py-4"><RecoPill rec={iv.recommendation} /></td>
+                        <td className="px-5 py-4">
+                          <StatusBadge status={iv.interview_status} feedbackSubmitted={iv.feedback_submitted} />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {!hasBucketedRows && allInterviews.length > 0 && (
+            <div className="border border-gray-100 bg-white shadow-sm overflow-hidden animate-fade-up !rounded-[2rem]">
+              <SectionHeader icon={ClipboardCheck} label="All Interview Records" count={allInterviews.length} accent="#6366f1" />
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm text-left">
+                  <THead columns={['Candidate', 'Email', 'Date', 'Interviewer', 'Status']} />
+                  <tbody>
+                    {allInterviews.map((iv) => (
+                      <tr key={iv.interview_id} className="table-row-premium">
+                        <td className="px-5 py-4">
+                          <div className="flex items-center gap-3">
+                            <Avatar name={iv.candidate_name} color="#6366f1" />
+                            <div>
+                              <p className="font-semibold text-gray-900 leading-tight">{iv.candidate_name}</p>
+                              {iv.candidate_email && (
+                                <p className="text-xs text-gray-400">{iv.candidate_email}</p>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-5 py-4">
+                          <a href={`mailto:${iv.candidate_email}`}
+                            className="text-xs text-blue-500 hover:underline flex items-center gap-1">
+                            <Mail className="w-3 h-3" /> {iv.candidate_email}
+                          </a>
+                        </td>
+                        <td className="px-5 py-4">
+                          <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                            <Calendar className="w-3.5 h-3.5 text-gray-400" />
+                            {formatDate(iv.scheduled_time)}
+                          </div>
+                        </td>
+                        <td className="px-5 py-4">
+                          <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                            <User className="w-3 h-3" />
+                            {iv.interviewer_name || 'N/A'}
+                          </div>
+                        </td>
                         <td className="px-5 py-4">
                           <StatusBadge status={iv.interview_status} feedbackSubmitted={iv.feedback_submitted} />
                         </td>

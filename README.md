@@ -103,8 +103,6 @@ automation-workflows/ (Private Repository - Authorized Team Only)
 
 ## 📚 Learn More
 
-- **Architecture & RBAC**: See `docs/important_docs/RBAC_ARCHITECTURE.md`
-- **Major Fixes**: See `docs/errors/` folder
 - **n8n Workflows**: Available in private `automation-workflows` repository (authorized team members only)
 
 ---
@@ -137,4 +135,4 @@ docker compose down -v
 
 ## ❓ Need Help?
 
-Check `docs/important_docs/` for detailed setup guides and common issues in `docs/errors/`
+Use Docker logs and FastAPI docs for troubleshooting and API validation.

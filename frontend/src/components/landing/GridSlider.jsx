@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { motion } from 'framer-motion'
+import { motion, useReducedMotion } from 'framer-motion'
 
 // Integration items with real logos and names - move outside to avoid re-creation
 const gridItems = [
@@ -16,13 +16,20 @@ const gridItems = [
 
 export default function GridSlider() {
   const [rotationIndex, setRotationIndex] = useState(0)
+  const shouldReduceMotion = useReducedMotion()
+
+  const getFallbackLogo = (name) => {
+    const safeName = encodeURIComponent(name)
+    return `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Crect width='256' height='256' rx='44' fill='%23111827'/%3E%3Ctext x='50%25' y='50%25' fill='white' font-family='Arial,sans-serif' font-size='28' text-anchor='middle' dominant-baseline='middle'%3E${safeName}%3C/text%3E%3C/svg%3E`
+  }
 
   useEffect(() => {
+    if (shouldReduceMotion) return
     const interval = setInterval(() => {
       setRotationIndex((prev) => (prev + 1) % gridItems.length)
     }, 4000)
     return () => clearInterval(interval)
-  }, [])
+  }, [shouldReduceMotion])
 
   const getItemIndex = (baseIdx) => (baseIdx + rotationIndex) % gridItems.length
 
@@ -92,14 +99,17 @@ export default function GridSlider() {
                   <div className="absolute inset-0 flex items-center justify-center group-hover:scale-110 transition-transform duration-300 p-10">
                     <motion.img
                       key={item.name} // Allows content change animation within the stable slot
-                      initial={{ opacity: 0, scale: 0.8 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      transition={{ duration: 0.5 }}
+                      initial={shouldReduceMotion ? false : { opacity: 0, scale: 0.92 }}
+                      animate={shouldReduceMotion ? { opacity: 1 } : { opacity: 1, scale: 1 }}
+                      transition={{ duration: 0.35 }}
                       src={item.logo}
                       alt={item.name}
+                      loading="lazy"
+                      decoding="async"
+                      referrerPolicy="no-referrer"
                       className="w-full h-full object-contain filter drop-shadow-xl"
                       onError={(e) => {
-                        e.target.src = `https://ui-avatars.com/api/?name=${item.name}&background=random&color=fff&size=512`
+                        e.currentTarget.src = getFallbackLogo(item.name)
                       }}
                     />
                   </div>
@@ -115,11 +125,7 @@ export default function GridSlider() {
                   <div className="absolute inset-0 bg-black/0 group-hover:bg-black/5 transition-colors duration-300" />
 
                   {/* Shine effect */}
-                  <motion.div
-                    className="absolute inset-0 bg-gradient-to-r from-transparent via-white/40 to-transparent opacity-0 group-hover:opacity-100"
-                    animate={{ x: ['-200%', '200%'] }}
-                    transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
-                  />
+                  <div className="shine-effect absolute inset-0 bg-gradient-to-r from-transparent via-white/40 to-transparent opacity-0 group-hover:opacity-100" />
                 </div>
               </motion.div>
             )
@@ -149,16 +155,20 @@ export default function GridSlider() {
       </div>
 
       <style>{`
-        @keyframes slide {
-          0%, 100% { transform: translateX(0); }
-          50% { transform: translateX(10px); }
-        }
-
         .bg-grid-pattern {
           background-image: 
             linear-gradient(0deg, transparent 24%, rgba(255, 255, 255, 0.05) 25%, rgba(255, 255, 255, 0.05) 26%, transparent 27%, transparent 74%, rgba(255, 255, 255, 0.05) 75%, rgba(255, 255, 255, 0.05) 76%, transparent 77%, transparent),
             linear-gradient(90deg, transparent 24%, rgba(255, 255, 255, 0.05) 25%, rgba(255, 255, 255, 0.05) 26%, transparent 27%, transparent 74%, rgba(255, 255, 255, 0.05) 75%, rgba(255, 255, 255, 0.05) 76%, transparent 77%, transparent);
           background-size: 50px 50px;
+        }
+
+        .shine-effect {
+          transform: translateX(-140%);
+          transition: transform 0.8s ease;
+        }
+
+        .group:hover .shine-effect {
+          transform: translateX(140%);
         }
       `}</style>
     </section>

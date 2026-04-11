@@ -18,20 +18,13 @@ import smtplib
 # ---------------------------------------------------------------------------
 PANEL_TEMPLATES = {
     "default": [
-        {"round": 1, "label": "HR Screen",       "department": "HR",          "format": "video call"},
-        {"round": 2, "label": "Technical Round",  "department": "Engineering", "format": "video call"},
-        {"round": 3, "label": "Manager Round",    "department": "Management",  "format": "video call"},
+        {"round": 1, "label": "HR Round",  "department": "HR",  "format": "video call"},
     ],
     "engineering": [
-        {"round": 1, "label": "HR Screen",        "department": "HR",          "format": "video call"},
-        {"round": 2, "label": "Technical Round 1","department": "Engineering", "format": "video call"},
-        {"round": 3, "label": "Technical Round 2","department": "Engineering", "format": "video call"},
-        {"round": 4, "label": "Manager Round",    "department": "Management",  "format": "video call"},
+        {"round": 1, "label": "HR Round",  "department": "HR",  "format": "video call"},
     ],
     "sales": [
-        {"round": 1, "label": "HR Screen",        "department": "HR",          "format": "phone"},
-        {"round": 2, "label": "Skills Assessment","department": "Sales",       "format": "video call"},
-        {"round": 3, "label": "Director Round",   "department": "Management",  "format": "in-person"},
+        {"round": 1, "label": "HR Round",  "department": "HR",  "format": "video call"},
     ],
 }
 
@@ -231,14 +224,53 @@ class SchedulingService:
         interview_format: str = "video call",
         google_event_id: Optional[str] = None,
         meeting_link: Optional[str] = None,
-    ) -> int:
+    ) -> Tuple[int, bool]:
         """
-        Persist an interview record and send an invite email to the candidate.
-        Returns the new interview_schedule id.
+        Persist an interview record and send scheduling details to the interviewer.
+        Returns (interview_schedule_id, created_new).
         """
         conn = get_db_connection()
         try:
+            normalized_email = (candidate_data.get("email") or "").strip().lower()
+            if not normalized_email:
+                raise ValueError("Candidate email is required for scheduling")
+            lock_key = f"interview_schedule:{normalized_email}"
+
             with conn.cursor() as cur:
+                # Serialize scheduling by candidate email, even when no row exists yet.
+                # This prevents duplicate inserts from concurrent webhook retries.
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (lock_key,))
+
+                # Idempotency guard: keep one active interview and cancel legacy duplicates.
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM interview_schedules
+                    WHERE LOWER(TRIM(candidate_email)) = %s
+                      AND status IN ('scheduled', 'in_progress')
+                    ORDER BY scheduled_time ASC NULLS LAST, created_at ASC
+                    FOR UPDATE
+                    """,
+                    (normalized_email,),
+                )
+                existing_rows = cur.fetchall() or []
+                if existing_rows:
+                    active_ids = [row[0] for row in existing_rows]
+                    keep_id = active_ids[0]
+                    duplicate_ids = active_ids[1:]
+
+                    if duplicate_ids:
+                        cur.execute(
+                            """
+                            UPDATE interview_schedules
+                            SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ANY(%s)
+                            """,
+                            (duplicate_ids,),
+                        )
+                    conn.commit()
+                    return keep_id, False
+
                 cur.execute(
                     """
                     INSERT INTO interview_schedules
@@ -249,22 +281,39 @@ class SchedulingService:
                     """,
                     (
                         candidate_data["name"],
-                        candidate_data["email"],
+                        normalized_email,
                         interviewer_id,
                         slot_iso,
                         google_event_id or "N/A",
                     ),
                 )
                 interview_id = cur.fetchone()[0]
+
+                cur.execute(
+                    """
+                    SELECT name, email
+                    FROM interviewers
+                    WHERE id = %s
+                    """,
+                    (interviewer_id,),
+                )
+                interviewer_row = cur.fetchone()
             conn.commit()
 
-            # Send candidate invite
-            self.send_invite_email(
-                candidate_data, slot_iso,
-                round_number=round_number, round_label=round_label,
-                interview_format=interview_format, meeting_link=meeting_link,
-            )
-            return interview_id
+            # Send scheduling details to interviewer only.
+            if interviewer_row and interviewer_row[1]:
+                self.send_interviewer_kit(
+                    interviewer_email=interviewer_row[1],
+                    interviewer_name=interviewer_row[0] or "Interviewer",
+                    candidate_name=candidate_data.get("name") or "Candidate",
+                    candidate_email=normalized_email,
+                    scheduled_time=slot_iso,
+                    round_label=f"Round {round_number}: {round_label}",
+                    meeting_link=meeting_link,
+                    google_event_id=google_event_id,
+                    interview_format=interview_format,
+                )
+            return interview_id, True
         except Exception as e:
             conn.rollback()
             raise e
@@ -275,7 +324,7 @@ class SchedulingService:
         self, interview_id: int, candidate_data: Dict, new_slot_iso: str
     ) -> bool:
         """
-        Update an existing interview to a new time slot and re-notify candidate.
+        Update an existing interview to a new time slot and notify interviewer.
         """
         conn = get_db_connection()
         try:
@@ -285,11 +334,38 @@ class SchedulingService:
                     UPDATE interview_schedules
                     SET scheduled_time = %s, status = 'scheduled'
                     WHERE id = %s
+                    RETURNING interviewer_id, candidate_name, candidate_email, google_event_id
                     """,
                     (new_slot_iso, interview_id),
                 )
+                row = cur.fetchone()
+                if not row:
+                    return False
+
+                interviewer_id, existing_candidate_name, existing_candidate_email, existing_google_event_id = row
+                cur.execute(
+                    """
+                    SELECT name, email
+                    FROM interviewers
+                    WHERE id = %s
+                    """,
+                    (interviewer_id,),
+                )
+                interviewer_row = cur.fetchone()
             conn.commit()
-            self.send_invite_email(candidate_data, new_slot_iso, round_label="Rescheduled Interview")
+
+            if interviewer_row and interviewer_row[1]:
+                self.send_interviewer_kit(
+                    interviewer_email=interviewer_row[1],
+                    interviewer_name=interviewer_row[0] or "Interviewer",
+                    candidate_name=(candidate_data.get("name") or existing_candidate_name or "Candidate"),
+                    candidate_email=(candidate_data.get("email") or existing_candidate_email or ""),
+                    scheduled_time=new_slot_iso,
+                    round_label="Rescheduled Interview",
+                    meeting_link=None,
+                    google_event_id=existing_google_event_id,
+                    interview_format="video call",
+                )
             return True
         except Exception as e:
             conn.rollback()
@@ -536,6 +612,9 @@ class SchedulingService:
         candidate_email: str,
         scheduled_time: str,
         round_label: str = "Interview",
+        meeting_link: Optional[str] = None,
+        google_event_id: Optional[str] = None,
+        interview_format: str = "video call",
         feedback_form_url: str = "",
         resume_summary: str = "",
         job_description: str = "",
@@ -549,6 +628,18 @@ class SchedulingService:
             base_url = self.secrets.get("app", {}).get("base_url", "http://localhost:8000")
             feedback_form_url = f"{base_url}/feedback-form.html"
 
+        meeting_section = (
+            f'<tr><td style="padding:6px 0;"><strong>Meeting Link:</strong></td><td><a href="{meeting_link}">{meeting_link}</a></td></tr>'
+            if meeting_link
+            else ""
+        )
+        event_section = (
+            f"<tr><td style=\"padding:6px 0;\"><strong>Google Event ID:</strong></td><td>{google_event_id}</td></tr>"
+            if google_event_id and google_event_id != "N/A"
+            else ""
+        )
+        formatted_time = self._format_slot_for_email(scheduled_time)
+
         html_body = f"""
         <!DOCTYPE html><html><body style="font-family:Arial,sans-serif;color:#333;">
         <div style="max-width:600px;margin:auto;padding:20px;">
@@ -561,7 +652,10 @@ class SchedulingService:
             <table style="width:100%;border-collapse:collapse;">
               <tr><td style="padding:6px 0;"><strong>Candidate:</strong></td><td>{candidate_name} ({candidate_email})</td></tr>
               <tr><td style="padding:6px 0;"><strong>Round:</strong></td><td>{round_label}</td></tr>
-              <tr><td style="padding:6px 0;"><strong>Scheduled Time:</strong></td><td>{scheduled_time}</td></tr>
+                            <tr><td style="padding:6px 0;"><strong>Format:</strong></td><td>{interview_format.title()}</td></tr>
+                            <tr><td style="padding:6px 0;"><strong>Scheduled Time:</strong></td><td>{formatted_time}</td></tr>
+                            {meeting_section}
+                            {event_section}
             </table>
             {"<h3>Job Description</h3><p>" + job_description[:500] + "...</p>" if job_description else ""}
             {"<h3>Candidate Resume Summary</h3><p>" + resume_summary[:400] + "...</p>" if resume_summary else ""}

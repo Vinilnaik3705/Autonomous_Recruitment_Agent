@@ -1,10 +1,31 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Interview Feedback Form</title>
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&family=DM+Sans:wght@400;500;700&display=swap');
+
+        :root {
+            --bg-1: #f4f8fb;
+            --bg-2: #e8f0f4;
+            --ink-strong: #12202f;
+            --ink-soft: #4e5f73;
+            --line: #d8e2ea;
+            --card: #ffffff;
+            --accent: #0f766e;
+            --accent-deep: #115e59;
+            --accent-soft: #e4f6f3;
+            --ok: #2d9d64;
+            --warn: #e09b26;
+            --bad: #d34f4f;
+            --radius-xl: 26px;
+            --radius-md: 14px;
+            --shadow: 0 20px 45px rgba(8, 29, 53, 0.11);
+        }
+
         * {
             margin: 0;
             padding: 0;
@@ -12,117 +33,163 @@
         }
 
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'DM Sans', sans-serif;
+            background:
+                radial-gradient(circle at 15% 20%, rgba(15, 118, 110, 0.16), transparent 42%),
+                radial-gradient(circle at 88% 10%, rgba(26, 120, 230, 0.14), transparent 38%),
+                linear-gradient(165deg, var(--bg-1), var(--bg-2));
             min-height: 100vh;
-            padding: 20px;
+            padding: 26px;
             display: flex;
             align-items: center;
             justify-content: center;
+            color: var(--ink-strong);
         }
 
         .container {
-            max-width: 700px;
+            max-width: 900px;
             width: 100%;
-            background: white;
-            border-radius: 12px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            background: var(--card);
+            border: 1px solid rgba(18, 32, 47, 0.08);
+            border-radius: var(--radius-xl);
+            box-shadow: var(--shadow);
             overflow: hidden;
+            animation: fade-up 0.45s ease-out;
         }
 
         .header {
-            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
-            color: white;
-            padding: 30px;
-            text-align: center;
+            position: relative;
+            background: linear-gradient(140deg, #153e63 0%, #0f766e 54%, #0b4d76 100%);
+            color: #f8fdff;
+            padding: 34px 34px 30px;
+            text-align: left;
+            overflow: hidden;
+        }
+
+        .header::after {
+            content: '';
+            position: absolute;
+            inset: auto -120px -140px auto;
+            width: 320px;
+            height: 320px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.09);
+            animation: float 7s ease-in-out infinite;
         }
 
         .header h1 {
-            font-size: 28px;
-            margin-bottom: 10px;
+            font-family: 'Manrope', sans-serif;
+            font-size: 1.9rem;
+            line-height: 1.2;
+            font-weight: 800;
+            margin-bottom: 8px;
+            letter-spacing: -0.015em;
+            position: relative;
+            z-index: 1;
         }
 
         .header p {
-            opacity: 0.9;
-            font-size: 14px;
+            opacity: 0.92;
+            font-size: 0.97rem;
+            max-width: 640px;
+            position: relative;
+            z-index: 1;
         }
 
         .candidate-info {
-            background: #f8fafc;
-            padding: 20px 30px;
-            border-bottom: 2px solid #e2e8f0;
+            background: linear-gradient(180deg, #f9fcfd 0%, #f7fbfc 100%);
+            padding: 22px 34px;
+            border-bottom: 1px solid var(--line);
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px 18px;
         }
 
         .candidate-info h3 {
-            color: #1e293b;
-            margin-bottom: 12px;
-            font-size: 16px;
+            grid-column: 1 / -1;
+            font-family: 'Manrope', sans-serif;
+            color: #0f2f4b;
+            margin-bottom: 4px;
+            font-size: 1rem;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
         }
 
         .candidate-info p {
-            color: #475569;
-            font-size: 14px;
-            margin-bottom: 6px;
+            color: var(--ink-soft);
+            font-size: 0.94rem;
+            margin-bottom: 0;
+            background: #ffffff;
+            border: 1px solid #e6edf2;
+            border-radius: 10px;
+            padding: 10px 12px;
         }
 
         .candidate-info strong {
-            color: #1e293b;
+            color: #1a3248;
+            font-weight: 700;
         }
 
         .form-content {
-            padding: 30px;
+            padding: 32px 34px 36px;
         }
 
         .form-group {
-            margin-bottom: 25px;
+            margin-bottom: 22px;
+            border: 1px solid #edf2f6;
+            background: #fcfeff;
+            border-radius: var(--radius-md);
+            padding: 16px;
         }
 
         label {
             display: block;
-            color: #1e293b;
-            font-weight: 600;
-            margin-bottom: 8px;
-            font-size: 14px;
+            color: #19344a;
+            font-family: 'Manrope', sans-serif;
+            font-weight: 700;
+            margin-bottom: 10px;
+            font-size: 0.93rem;
         }
 
         .required {
-            color: #dc2626;
+            color: #cf4040;
         }
 
+        input[type="email"],
         input[type="number"],
         textarea,
         select {
             width: 100%;
-            padding: 12px;
-            border: 2px solid #e2e8f0;
-            border-radius: 8px;
-            font-size: 14px;
+            padding: 12px 13px;
+            border: 1px solid #c9d8e4;
+            border-radius: 10px;
+            font-size: 0.93rem;
             font-family: inherit;
-            transition: border-color 0.3s;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+            background: #ffffff;
+            color: #1c3144;
         }
 
+        input[type="email"]:focus,
         input[type="number"]:focus,
         textarea:focus,
         select:focus {
             outline: none;
-            border-color: #2563eb;
+            border-color: #1d8fa2;
+            box-shadow: 0 0 0 4px rgba(29, 143, 162, 0.14);
         }
 
         textarea {
             resize: vertical;
-            min-height: 100px;
+            min-height: 118px;
+            line-height: 1.55;
         }
 
         .rating-container {
-            display: flex;
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
             gap: 10px;
-            align-items: center;
-            flex-wrap: wrap;
-        }
-
-        .rating-option {
-            flex: 1;
-            min-width: 60px;
+            align-items: stretch;
         }
 
         .rating-option input[type="radio"] {
@@ -130,43 +197,47 @@
         }
 
         .rating-option label {
-            display: block;
-            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            min-height: 76px;
             text-align: center;
-            border: 2px solid #e2e8f0;
-            border-radius: 8px;
+            border: 1px solid #cfdae4;
+            border-radius: 12px;
             cursor: pointer;
-            transition: all 0.3s;
-            font-weight: normal;
+            transition: all 0.2s ease;
+            font-family: 'DM Sans', sans-serif;
+            font-weight: 600;
             margin: 0;
+            background: #ffffff;
+            color: #3a4b5d;
         }
 
-        .rating-option input[type="radio"]:checked + label {
-            background: #2563eb;
-            color: white;
-            border-color: #2563eb;
-            font-weight: 600;
+        .rating-option input[type="radio"]:checked+label {
+            background: linear-gradient(180deg, #1f7f8c 0%, #16616b 100%);
+            color: #ffffff;
+            border-color: #16616b;
+            box-shadow: 0 10px 22px rgba(22, 97, 107, 0.28);
+            transform: translateY(-1px);
         }
 
         .rating-option label:hover {
-            border-color: #2563eb;
-            background: #eff6ff;
+            border-color: #1f7f8c;
+            background: #f0fafb;
         }
 
         .help-text {
-            font-size: 12px;
-            color: #64748b;
-            margin-top: 5px;
+            font-size: 0.8rem;
+            color: #66788b;
+            margin-top: 8px;
         }
 
         .recommendation-options {
-            display: flex;
-            gap: 15px;
-            margin-top: 10px;
-        }
-
-        .recommendation-option {
-            flex: 1;
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+            margin-top: 8px;
         }
 
         .recommendation-option input[type="radio"] {
@@ -174,82 +245,92 @@
         }
 
         .recommendation-option label {
-            display: block;
-            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 14px;
+            min-height: 88px;
             text-align: center;
-            border: 2px solid #e2e8f0;
-            border-radius: 8px;
+            border: 1px solid #d5dee7;
+            border-radius: 12px;
             cursor: pointer;
-            transition: all 0.3s;
-            font-weight: 600;
+            transition: all 0.2s ease;
+            font-weight: 700;
             margin: 0;
+            background: #ffffff;
+            color: #32495f;
         }
 
-        .recommendation-option input[type="radio"]:checked + label {
-            transform: scale(1.05);
+        .recommendation-option input[type="radio"]:checked+label {
+            transform: translateY(-2px);
+            color: #ffffff;
+            border-color: transparent;
         }
 
-        .recommendation-option:nth-child(1) input[type="radio"]:checked + label {
-            background: #10b981;
-            color: white;
-            border-color: #10b981;
+        .recommendation-option:nth-child(1) input[type="radio"]:checked+label {
+            background: linear-gradient(145deg, #2d9d64, #1f7f4d);
+            box-shadow: 0 10px 20px rgba(31, 127, 77, 0.27);
         }
 
-        .recommendation-option:nth-child(2) input[type="radio"]:checked + label {
-            background: #f59e0b;
-            color: white;
-            border-color: #f59e0b;
+        .recommendation-option:nth-child(2) input[type="radio"]:checked+label {
+            background: linear-gradient(145deg, #e09b26, #c47f11);
+            box-shadow: 0 10px 20px rgba(196, 127, 17, 0.27);
         }
 
-        .recommendation-option:nth-child(3) input[type="radio"]:checked + label {
-            background: #ef4444;
-            color: white;
-            border-color: #ef4444;
+        .recommendation-option:nth-child(3) input[type="radio"]:checked+label {
+            background: linear-gradient(145deg, #d34f4f, #b43333);
+            box-shadow: 0 10px 20px rgba(179, 51, 51, 0.27);
         }
 
         .submit-btn {
             width: 100%;
             padding: 15px;
-            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
-            color: white;
+            background: linear-gradient(135deg, var(--accent) 0%, var(--accent-deep) 100%);
+            color: #ffffff;
             border: none;
-            border-radius: 8px;
-            font-size: 16px;
-            font-weight: 600;
+            border-radius: 12px;
+            font-size: 1rem;
+            font-weight: 700;
+            font-family: 'Manrope', sans-serif;
             cursor: pointer;
-            transition: all 0.3s;
-            margin-top: 10px;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            margin-top: 2px;
+            letter-spacing: 0.01em;
         }
 
         .submit-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(37, 99, 235, 0.3);
+            transform: translateY(-1px);
+            box-shadow: 0 12px 24px rgba(17, 94, 89, 0.3);
         }
 
         .submit-btn:disabled {
-            background: #cbd5e1;
+            background: #a8bdc8;
             cursor: not-allowed;
             transform: none;
+            box-shadow: none;
         }
 
         .success-message,
         .error-message {
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 20px;
+            padding: 12px 14px;
+            border-radius: 10px;
+            margin-bottom: 18px;
             display: none;
+            font-size: 0.92rem;
+            line-height: 1.45;
         }
 
         .success-message {
-            background: #d1fae5;
-            color: #065f46;
-            border: 1px solid #10b981;
+            background: #e9f9f1;
+            color: #1f6543;
+            border: 1px solid #9fdab9;
         }
 
         .error-message {
-            background: #fee2e2;
-            color: #991b1b;
-            border: 1px solid #ef4444;
+            background: #feeeee;
+            color: #8d2d2d;
+            border: 1px solid #f2bbbb;
         }
 
         .success-message.show,
@@ -257,22 +338,75 @@
             display: block;
         }
 
-        @media (max-width: 600px) {
-            .recommendation-options {
-                flex-direction: column;
+        @keyframes fade-up {
+            from {
+                opacity: 0;
+                transform: translateY(12px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes float {
+
+            0%,
+            100% {
+                transform: translateY(0px);
+            }
+
+            50% {
+                transform: translateY(-11px);
+            }
+        }
+
+        @media (max-width: 800px) {
+            .candidate-info {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 640px) {
+            body {
+                padding: 14px;
+            }
+
+            .header {
+                padding: 24px 20px;
+            }
+
+            .header h1 {
+                font-size: 1.45rem;
+            }
+
+            .candidate-info,
+            .form-content {
+                padding-left: 20px;
+                padding-right: 20px;
+            }
+
+            .form-group {
+                padding: 13px;
             }
 
             .rating-container {
-                flex-direction: column;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .recommendation-options {
+                grid-template-columns: 1fr;
             }
         }
     </style>
 </head>
+
 <body>
     <div class="container">
         <div class="header">
-            <h1>📝 Interview Feedback Form</h1>
-            <p>Please provide your honest evaluation of the candidate</p>
+            <h1>Candidate Interview Evaluation</h1>
+            <p>Share a structured assessment to help the hiring team make a confident and fair decision.</p>
         </div>
 
         <div class="candidate-info" id="candidateInfo">
@@ -285,15 +419,16 @@
 
         <form id="feedbackForm" class="form-content">
             <div class="success-message" id="successMessage">
-                ✅ Feedback submitted successfully! Thank you for your evaluation.
+                Feedback submitted successfully. Thank you for completing the evaluation.
             </div>
             <div class="error-message" id="errorMessage">
-                ❌ <span id="errorText">An error occurred. Please try again.</span>
+                <span id="errorText">An error occurred. Please try again.</span>
             </div>
 
             <div class="form-group" id="manualDetailsGroup" style="display:none;">
                 <label for="manualCandidateEmail">Candidate Email <span class="required">*</span></label>
-                <input type="email" id="manualCandidateEmail" name="manual_candidate_email" placeholder="candidate@example.com">
+                <input type="email" id="manualCandidateEmail" name="manual_candidate_email"
+                    placeholder="candidate@example.com">
                 <p class="help-text">Add candidate email when opening form directly without a tracking link.</p>
             </div>
 
@@ -471,15 +606,15 @@
                 <div class="recommendation-options">
                     <div class="recommendation-option">
                         <input type="radio" id="accept" name="recommendation" value="ACCEPT" required>
-                        <label for="accept">✅ ACCEPT<br><small>Proceed with offer</small></label>
+                        <label for="accept">ACCEPT<br><small>Proceed with offer</small></label>
                     </div>
                     <div class="recommendation-option">
                         <input type="radio" id="onhold" name="recommendation" value="ON_HOLD">
-                        <label for="onhold">⏸️ ON HOLD<br><small>Needs review</small></label>
+                        <label for="onhold">ON HOLD<br><small>Needs review</small></label>
                     </div>
                     <div class="recommendation-option">
                         <input type="radio" id="reject" name="recommendation" value="REJECT">
-                        <label for="reject">❌ REJECT<br><small>Not a fit</small></label>
+                        <label for="reject">REJECT<br><small>Not a fit</small></label>
                     </div>
                 </div>
             </div>
@@ -487,17 +622,14 @@
             <!-- Additional Comments -->
             <div class="form-group">
                 <label for="comments">Additional Comments & Observations <span class="required">*</span></label>
-                <textarea 
-                    id="comments" 
-                    name="comments" 
+                <textarea id="comments" name="comments"
                     placeholder="Please provide specific examples and detailed feedback about the candidate's performance, strengths, areas of concern, etc."
-                    required
-                    minlength="20"></textarea>
+                    required minlength="20"></textarea>
                 <p class="help-text">Minimum 20 characters required</p>
             </div>
 
             <button type="submit" class="submit-btn" id="submitBtn">
-                Submit Feedback
+                Submit Evaluation
             </button>
         </form>
     </div>
@@ -565,7 +697,7 @@
 
             // Disable submit button
             submitBtn.disabled = true;
-            submitBtn.textContent = 'Submitting...';
+            submitBtn.textContent = 'Submitting Evaluation...';
 
             try {
                 const response = await fetch(WEBHOOK_URL, {
@@ -587,13 +719,14 @@
                 console.error('Error:', error);
                 showError(error.message || 'Failed to submit feedback. Please try again or contact HR if the problem persists.');
                 submitBtn.disabled = false;
-                submitBtn.textContent = 'Submit Feedback';
+                submitBtn.textContent = 'Submit Evaluation';
             }
         });
 
         function showSuccess() {
             successMessage.classList.add('show');
             errorMessage.classList.remove('show');
+            submitBtn.textContent = 'Submitted Successfully';
             window.scrollTo({ top: 0, behavior: 'smooth' });
         }
 
@@ -614,4 +747,5 @@
         }
     </script>
 </body>
+
 </html>

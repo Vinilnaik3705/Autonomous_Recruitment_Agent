@@ -213,6 +213,23 @@ const statusDot = (s) =>
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+const runWithConcurrency = async (items, worker, concurrency = 4) => {
+  const limit = Math.max(1, Math.min(concurrency, items.length || 1));
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  const runner = async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await worker(items[currentIndex], currentIndex);
+    }
+  };
+
+  await Promise.all(Array.from({ length: limit }, () => runner()));
+  return results;
+};
+
 /* --- Main Component ---------------------------------------- */
 const HRScreening = () => {
   const auth = useAuth();
@@ -249,9 +266,20 @@ const HRScreening = () => {
   }, []);
 
   React.useEffect(() => {
-    loadNotifications();
-    const interval = setInterval(loadNotifications, 10000); // Poll every 10s
-    return () => clearInterval(interval);
+    const refreshNotifications = () => {
+      if (document.visibilityState === 'visible') {
+        loadNotifications();
+      }
+    };
+
+    refreshNotifications();
+    const interval = setInterval(refreshNotifications, 30000);
+    document.addEventListener('visibilitychange', refreshNotifications);
+
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', refreshNotifications);
+    };
   }, [loadNotifications]);
 
   const handleMarkAsRead = async (id) => {
@@ -459,7 +487,7 @@ const HRScreening = () => {
     resumes.forEach(f => (newStatus[f.name] = 'processing'));
     setUploadStatus(prev => ({ ...prev, ...newStatus }));
 
-    const uploadResults = await Promise.all(resumes.map(async (file) => {
+    const uploadResults = await runWithConcurrency(resumes, async (file) => {
       try {
         const form = new FormData();
         form.append('file', file);
@@ -474,7 +502,7 @@ const HRScreening = () => {
         setUploadStatus(prev => ({ ...prev, [file.name]: 'error' }));
         return { status: 'error', file: file.name };
       }
-    }));
+    }, 4);
 
     if (uploadResults.every(r => r.status === 'error')) {
       try {
@@ -563,7 +591,7 @@ const HRScreening = () => {
 
     // Poll the FastAPI DB endpoint for results (NOT the n8n webhook).
     // This avoids triggering extra n8n executions on every poll tick.
-    const RESULTS_URL = `http://localhost:8000/jobs/results/${jobId}`;
+    const RESULTS_URL = `/api/jobs/results/${jobId}`;
     const pollDeadline = Date.now() + 120000; // 2 min timeout
     let uiResults = [];
 

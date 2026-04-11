@@ -139,8 +139,13 @@ export const createJobDescription = async (jobData) => {
     return response.data;
 };
 
-export const getInterviewStatus = async () => {
+export const getInterviewStatus = async (forceFresh = false) => {
     const cacheKey = getCacheKey('/jobs/interviewstatus');
+
+    if (forceFresh) {
+        delete requestCache.data[cacheKey];
+        delete requestCache.inFlight[cacheKey];
+    }
     
     // Check if we have a cached response within TTL
     const cached = getCachedResponse(cacheKey);

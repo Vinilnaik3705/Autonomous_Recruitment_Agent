@@ -6,16 +6,20 @@ class OnboardingService:
     def generate_offer_letter(self, candidate_name: str, role: str, start_date: str, salary: str):
         # In a real app, this would use a template engine like Jinja2 or python-docx
         return f"""
-        OFFER LETTER
-        
+        Offer Letter
+
         Dear {candidate_name},
-        
-        We are thrilled to offer you the position of {role}!
-        
-        Start Date: {start_date}
-        Salary: {salary}
-        
-        Welcome to the team!
+
+        We are pleased to extend a formal offer for the position of {role} with our team.
+
+        Offer Details:
+        - Start Date: {start_date}
+        - Salary: {salary}
+
+        Please review the offer and confirm your acceptance within the requested timeline.
+
+        Best regards,
+        HR Recruiting Team
         """
         
     def initiate_onboarding(self, candidate_email: str, offer_details: Dict):

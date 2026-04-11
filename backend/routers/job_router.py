@@ -1,10 +1,11 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File, Form, Depends
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from backend.database import get_db_connection
 import uuid
 import os
 import hashlib
+import asyncio
 from backend.phase_logger import log_phase_completion
 
 router = APIRouter(prefix="/jobs", tags=["Jobs"])
@@ -101,7 +102,6 @@ def create_job_description(job: JobDescriptionCreate):
     finally:
         conn.close()
 
-from fastapi import UploadFile, File, Form, Depends
 import httpx
 
 
@@ -143,6 +143,51 @@ def _candidate_webhook_urls(primary_url: str) -> list[str]:
             seen.add(u)
             ordered.append(u)
     return ordered
+
+
+def _parse_resume_payload(file_name: str, file_content: bytes) -> Dict[str, Any]:
+    from backend.services.resume_service import (
+        extract_text_and_links_from_pdf_stream,
+        extract_name,
+        extract_email,
+        extract_contact_number,
+        extract_skills as extract_resume_skills,
+    )
+
+    resume_text, _ = extract_text_and_links_from_pdf_stream(file_content)
+    return {
+        'name': extract_name(resume_text) or "Unknown",
+        'email': extract_email(resume_text) or "",
+        'phone': extract_contact_number(resume_text) or "",
+        'skills': extract_resume_skills(resume_text),
+        'resume_text': resume_text,
+        'filename': file_name,
+    }
+
+
+async def _extract_resume_payloads(files: List[UploadFile], concurrency: int = 4) -> List[Dict[str, Any]]:
+    if not files:
+        return []
+
+    semaphore = asyncio.Semaphore(max(1, min(concurrency, len(files))))
+
+    async def process_file(file: UploadFile):
+        try:
+            file_content = await file.read()
+            async with semaphore:
+                return await asyncio.to_thread(_parse_resume_payload, file.filename, file_content)
+        except Exception as exc:
+            return exc
+
+    parsed = await asyncio.gather(*(process_file(file) for file in files), return_exceptions=False)
+    valid_payloads: List[Dict[str, Any]] = []
+    for idx, result in enumerate(parsed):
+        if isinstance(result, Exception):
+            print(f"Error processing {files[idx].filename}: {result}")
+            continue
+        valid_payloads.append(result)
+
+    return valid_payloads
 
 @router.get("/health")
 async def check_n8n_health():
@@ -313,7 +358,7 @@ async def proxy_n8n_resume_upload(
 
 
 @router.post("/start-screening-proxy")
-async def proxy_start_screening(jobId: str = Form(...)):
+async def proxy_start_screening(background_tasks: BackgroundTasks, jobId: str = Form(...)):
     """Proxy screening trigger through FastAPI and fallback to schedule webhook when needed."""
     N8N_SCREEN_URL = os.environ.get("N8N_START_SCREENING_WEBHOOK", "http://localhost:5678/webhook/start-screening")
     N8N_SCHEDULE_URL = (
@@ -341,7 +386,7 @@ async def proxy_start_screening(jobId: str = Form(...)):
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """
-                    SELECT candidate_name, email, phone, skills, ai_score
+                    SELECT id, candidate_name, email, phone, skills, ai_score, email_sent
                     FROM resume_data
                     WHERE job_id = %s AND ai_score >= 35
                     ORDER BY ai_score DESC;
@@ -349,7 +394,28 @@ async def proxy_start_screening(jobId: str = Form(...)):
                     (jobId,),
                 )
                 rows = cur.fetchall() or []
+                cur.execute(
+                    """
+                    SELECT DISTINCT LOWER(TRIM(candidate_email)) AS candidate_email
+                    FROM interview_schedules
+                    WHERE status = 'scheduled' AND candidate_email IS NOT NULL;
+                    """
+                )
+                already_scheduled_emails = {
+                    (row.get("candidate_email") or "").strip().lower()
+                    for row in (cur.fetchall() or [])
+                    if (row.get("candidate_email") or "").strip()
+                }
+
+                seen_emails = set()
                 for row in rows:
+                    normalized_email = (row.get("email") or "").strip().lower()
+                    if not normalized_email:
+                        continue
+                    if normalized_email in seen_emails:
+                        continue
+                    seen_emails.add(normalized_email)
+
                     skills = row.get("skills")
                     if isinstance(skills, str):
                         skills_text = skills
@@ -360,22 +426,62 @@ async def proxy_start_screening(jobId: str = Form(...)):
 
                     shortlisted_candidates.append(
                         {
+                            "resume_data_id": row.get("id"),
                             "candidate_name": row.get("candidate_name") or "Candidate",
                             "email": row.get("email") or "",
                             "phone": row.get("phone") or "",
                             "skills": skills_text,
                             "score": float(row.get("ai_score") or 0),
                             "shortlisted": True,
+                            "email_sent": bool(row.get("email_sent")),
+                            "already_scheduled": normalized_email in already_scheduled_emails,
                         }
                     )
         finally:
             conn.close()
 
+        # Ensure shortlisted email is sent for n8n-driven flow as well.
+        for candidate in shortlisted_candidates:
+            if candidate.get("email_sent"):
+                continue
+            if not candidate.get("email"):
+                continue
+            if not candidate.get("resume_data_id"):
+                continue
+            background_tasks.add_task(
+                _send_shortlisted_resume_email,
+                candidate.get("resume_data_id"),
+                candidate.get("candidate_name") or "Candidate",
+                candidate.get("email"),
+            )
+
+        # Do not schedule interviews again for candidates who already have one.
+        candidates_to_schedule = [
+            {
+                "candidate_name": c.get("candidate_name") or "Candidate",
+                "email": c.get("email") or "",
+                "phone": c.get("phone") or "",
+                "skills": c.get("skills") or "",
+                "score": float(c.get("score") or 0),
+                "shortlisted": True,
+            }
+            for c in shortlisted_candidates
+            if not c.get("already_scheduled")
+        ]
+
         payload = {
             "jobId": jobId,
             "job_id": jobId,
-            "shortlisted_candidates": shortlisted_candidates,
+            "shortlisted_candidates": candidates_to_schedule,
         }
+
+        if not candidates_to_schedule:
+            return {
+                "success": True,
+                "message": "No new shortlisted candidates to schedule.",
+                "job_id": jobId,
+                "shortlisted_candidates": 0,
+            }
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = None
@@ -395,7 +501,7 @@ async def proxy_start_screening(jobId: str = Form(...)):
                     "success": False,
                     "message": "No screening webhook reachable; trigger skipped",
                     "job_id": jobId,
-                    "shortlisted_candidates": len(shortlisted_candidates),
+                    "shortlisted_candidates": len(candidates_to_schedule),
                     "attempts": attempt_errors,
                 }
 
@@ -407,7 +513,7 @@ async def proxy_start_screening(jobId: str = Form(...)):
                     "success": False,
                     "message": "Screening webhook returned an error; trigger skipped",
                     "job_id": jobId,
-                    "shortlisted_candidates": len(shortlisted_candidates),
+                    "shortlisted_candidates": len(candidates_to_schedule),
                     "attempts": attempt_errors,
                     "response_preview": response.text[:300],
                 }
@@ -422,6 +528,7 @@ async def proxy_start_screening(jobId: str = Form(...)):
                 "success": True,
                 "message": "Screening triggered successfully",
                 "status_code": response.status_code,
+                "shortlisted_candidates": len(candidates_to_schedule),
                 "raw_response": response.text[:200],
             }
     except HTTPException:
@@ -443,7 +550,6 @@ async def batch_screen_resumes(
     Uses Sentence Transformers for semantic similarity matching.
     Threshold: 35/100 for shortlisting.
     """
-    from backend.services.resume_service import extract_text_and_links_from_pdf_stream
     import json
     
     print(f"\n{'='*60}")
@@ -469,36 +575,8 @@ async def batch_screen_resumes(
         job_description = f"{job['title']}\n{job['description']}\nRequired Skills: {job['required_skills']}"
         print(f"Job: {job['title']}")
         
-        # Extract text from all PDFs
-        resume_data_list = []
-        for file in files:
-            try:
-                print(f"Processing: {file.filename}")
-                file_content = await file.read()
-                
-                # Extract PDF text
-                resume_text, _ = extract_text_and_links_from_pdf_stream(file_content)
-                
-                # Use proper parsing functions for accurate extraction
-                from backend.services.resume_service import extract_name, extract_email, extract_contact_number, extract_skills as extract_resume_skills
-                
-                name = extract_name(resume_text) or "Unknown"
-                email = extract_email(resume_text) or ""
-                phone = extract_contact_number(resume_text) or ""
-                skills = extract_resume_skills(resume_text)
-                
-                resume_data_list.append({
-                    'name': name,
-                    'email': email,
-                    'phone': phone,
-                    'resume_text': resume_text,
-                    'skills': skills,
-                    'filename': file.filename
-                })
-                
-            except Exception as e:
-                print(f"Error processing {file.filename}: {e}")
-                continue
+        # Extract text from all resumes with bounded concurrency.
+        resume_data_list = await _extract_resume_payloads(files, concurrency=4)
         
         if not resume_data_list:
             raise HTTPException(status_code=400, detail="No valid resumes could be processed")
@@ -518,13 +596,31 @@ async def batch_screen_resumes(
         saved_candidates = []
         
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            existing_resume_by_email = {}
+            candidate_emails = list({
+                (r.get('email') or '').strip().lower()
+                for r in scored_results
+                if (r.get('email') or '').strip()
+            })
+
+            if candidate_emails:
+                cur.execute(
+                    """
+                    SELECT id, email, email_sent
+                    FROM resume_data
+                    WHERE job_id = %s AND LOWER(email) = ANY(%s);
+                    """,
+                    (jobId, candidate_emails),
+                )
+                existing_resume_by_email = {
+                    (row['email'] or '').strip().lower(): row
+                    for row in cur.fetchall()
+                    if (row.get('email') or '').strip()
+                }
+
             for idx, result in enumerate(scored_results):
-                # Check if candidate already exists for this job
-                cur.execute("""
-                    SELECT id, email_sent FROM resume_data 
-                    WHERE job_id = %s AND email = %s;
-                """, (jobId, result['email']))
-                existing_resume = cur.fetchone()
+                normalized_email = (result.get('email') or '').strip().lower()
+                existing_resume = existing_resume_by_email.get(normalized_email) if normalized_email else None
                 
                 if existing_resume:
                     print(f"  ↻ Updating existing candidate: {result['candidate_name']} ({result['email']})")
@@ -588,6 +684,12 @@ async def batch_screen_resumes(
                     ))
                     resume_data_id = cur.fetchone()['id']
                     email_sent = False
+
+                    if normalized_email:
+                        existing_resume_by_email[normalized_email] = {
+                            'id': resume_data_id,
+                            'email_sent': email_sent,
+                        }
                 
                 # 3. Save to candidates (workflow tracking)
                 cur.execute("""
@@ -646,11 +748,24 @@ async def batch_screen_resumes(
             
             # 🔧 FIX: Filter out candidates who already have scheduled interviews
             with conn.cursor() as cur:
-                cur.execute("SELECT DISTINCT candidate_email FROM interview_schedules WHERE status = 'scheduled'")
-                already_scheduled_emails = {row[0] for row in cur.fetchall()}
+                cur.execute(
+                    """
+                    SELECT DISTINCT LOWER(TRIM(candidate_email))
+                    FROM interview_schedules
+                    WHERE status = 'scheduled' AND candidate_email IS NOT NULL
+                    """
+                )
+                already_scheduled_emails = {
+                    (row[0] or '').strip().lower()
+                    for row in cur.fetchall()
+                    if row and row[0]
+                }
             
             # Filter shortlisted candidates to exclude those already scheduled
-            candidates_to_schedule = [c for c in shortlisted if c['email'] not in already_scheduled_emails]
+            candidates_to_schedule = [
+                c for c in shortlisted
+                if (c.get('email') or '').strip().lower() not in already_scheduled_emails
+            ]
             
             if not candidates_to_schedule:
                 print(f"⚠️ All {len(shortlisted)} shortlisted candidates already have interviews scheduled. Skipping.")

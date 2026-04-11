@@ -260,12 +260,19 @@ def schedule_interview(req: ScheduleRequest):
     try:
         # Construct dict expected by service
         candidate_data = {"email": req.candidate_email, "name": req.candidate_name}
-        interview_id = scheduler.schedule_interview(candidate_data, req.interviewer_id, req.slot_iso)
-        log_phase_completion(
-            "Interview Scheduling",
-            f"candidate={req.candidate_email} interview_id={interview_id}",
-        )
-        return {"status": "scheduled", "interview_id": interview_id}
+        interview_id, created_new = scheduler.schedule_interview(candidate_data, req.interviewer_id, req.slot_iso)
+        if created_new:
+            log_phase_completion(
+                "Interview Scheduling",
+                f"candidate={req.candidate_email} interview_id={interview_id}",
+            )
+            return {"status": "scheduled", "interview_id": interview_id}
+
+        return {
+            "status": "already_scheduled",
+            "interview_id": interview_id,
+            "message": "Candidate already has an active interview schedule",
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -424,7 +431,7 @@ def apply_decision(interview_id: int):
         elif decision == "pass":
             scheduler.send_next_round_email(
                 candidate_name, candidate_email,
-                next_round_number=2, next_round_label="Technical Round"
+                next_round_number=1, next_round_label="HR Round"
             )
 
         log_phase_completion(
@@ -635,18 +642,46 @@ def get_interview_status_main():
         for row in rows:
             iv = dict(row)
             sched = iv['scheduled_time']
+            original_status = (iv.get('interview_status') or '').strip().lower()
             # Normalise to UTC-aware datetime
             if sched is not None:
                 if sched.tzinfo is None:
                     sched = sched.replace(tzinfo=timezone.utc)
                 end_time = sched + timedelta(hours=1)
+                # Keep workflow-driven feedback states visible in the completed section.
+                stored = (iv['interview_status'] or '').lower()
+                if stored in (
+                    'feedback_accepted',
+                    'feedback_rejected',
+                    'feedback_on_hold',
+                    'decision_pass',
+                    'decision_fail',
+                    'decision_hold',
+                ) or iv['feedback_submitted']:
+                    iv['interview_status'] = 'completed'
                 # Only override if the stored status is not already cancelled/completed-with-feedback
-                stored = iv['interview_status']
                 if stored not in ('cancelled',) and not iv['feedback_submitted']:
                     if sched <= now <= end_time:
                         iv['interview_status'] = 'in_progress'
                     elif now > end_time and stored == 'scheduled':
                         iv['interview_status'] = 'completed'
+
+            # If a row still has an unrecognized status, make it visible in the dashboard
+            # instead of leaving it in an unrendered bucket.
+            if iv.get('interview_status') not in ('scheduled', 'in_progress', 'completed', 'cancelled'):
+                if iv.get('feedback_submitted') or original_status in (
+                    'feedback_accepted',
+                    'feedback_rejected',
+                    'feedback_on_hold',
+                    'decision_pass',
+                    'decision_fail',
+                    'decision_hold',
+                ):
+                    iv['interview_status'] = 'completed'
+                elif sched is not None:
+                    iv['interview_status'] = 'scheduled'
+                else:
+                    iv['interview_status'] = 'in_progress'
             interviews.append(iv)
 
         # Categorise by computed status
@@ -661,6 +696,7 @@ def get_interview_status_main():
             "in_progress":      in_progress,
             "completed":        completed,
             "cancelled":        cancelled,
+            "all_interviews":   interviews,
             "with_feedback":    sum(1 for i in interviews if i.get('feedback_submitted')),
             "pending_feedback": sum(1 for i in interviews if i.get('interview_status') in ('completed', 'in_progress') and not i.get('feedback_submitted'))
         }

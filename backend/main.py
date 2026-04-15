@@ -71,6 +71,145 @@ onboarding_service = None
 resume_agent = None
 matcher_service = None
 
+def _repair_incomplete_scheduled_interviews():
+    """
+    Backfill scheduled interview rows that were inserted with placeholder
+    candidate/email/time by external workflow SQL nodes.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            # Active interview rows ordered by creation.
+            cur.execute(
+                """
+                SELECT id, interviewer_id, candidate_name, candidate_email, scheduled_time, created_at
+                FROM interview_schedules
+                WHERE status IN ('scheduled', 'in_progress')
+                ORDER BY created_at ASC
+                """
+            )
+            active_rows = cur.fetchall() or []
+            if not active_rows:
+                conn.rollback()
+                return
+
+            # Canonical shortlist source after screening - prioritize interview_status = 'shortlisted'
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(NULLIF(TRIM(candidate_name), ''), 'Candidate') AS resolved_name,
+                    LOWER(TRIM(email)) AS resolved_email
+                FROM resume_data
+                WHERE email IS NOT NULL
+                  AND TRIM(email) <> ''
+                  AND (
+                    interview_status = 'shortlisted'
+                    OR (interview_status ILIKE 'shortlist%' AND ai_score >= 35)
+                    OR (interview_status IS NULL AND ai_score >= 60)
+                  )
+                ORDER BY
+                  CASE
+                    WHEN interview_status = 'shortlisted' THEN 0
+                    WHEN interview_status ILIKE 'shortlist%' THEN 1
+                    ELSE 2
+                  END ASC,
+                  ai_score DESC NULLS LAST,
+                  created_at DESC
+                """
+            )
+            shortlist = [
+                (str(r[0]).strip(), str(r[1]).strip().lower())
+                for r in (cur.fetchall() or [])
+                if r and r[1]
+            ]
+            shortlist_emails = {email for _name, email in shortlist}
+
+            # Track active rows already correctly bound to shortlist emails.
+            bound_emails = set()
+            repaired = 0
+            now_utc = datetime.now(timezone.utc)
+
+            for row in active_rows:
+                row_id, _interviewer_id, raw_name, raw_email, raw_scheduled_time, _created_at = row
+                email_norm = str(raw_email or "").strip().lower()
+                name_norm = str(raw_name or "").strip()
+                name_bad = (not name_norm) or name_norm.lower() in ("candidate", "unknown")
+                time_bad = raw_scheduled_time is None
+                if raw_scheduled_time is not None:
+                    sched_dt = raw_scheduled_time if raw_scheduled_time.tzinfo else raw_scheduled_time.replace(tzinfo=timezone.utc)
+                    if sched_dt <= now_utc + timedelta(minutes=30):
+                        time_bad = True
+
+                # Keep valid, uniquely mapped shortlist rows.
+                if email_norm and email_norm in shortlist_emails and email_norm not in bound_emails and not name_bad and not time_bad:
+                    bound_emails.add(email_norm)
+                    continue
+
+                # Assign next unbound shortlisted candidate.
+                pick_name = None
+                pick_email = None
+                for s_name, s_email in shortlist:
+                    if s_email not in bound_emails:
+                        pick_name = s_name
+                        pick_email = s_email
+                        bound_emails.add(s_email)
+                        break
+
+                # If no shortlisted candidate remains, cancel placeholder duplicate rows.
+                if not pick_email:
+                    cur.execute(
+                        """
+                        UPDATE interview_schedules
+                        SET status = 'cancelled',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        """,
+                        (row_id,),
+                    )
+                    repaired += 1
+                    continue
+
+                # Deterministic next-day slot in UTC for repaired rows.
+                next_day = (now_utc + timedelta(days=1)).date()
+                hour_slot = 10 + (int(row_id) % 4)
+                fixed_time = datetime(
+                    next_day.year,
+                    next_day.month,
+                    next_day.day,
+                    hour_slot,
+                    0,
+                    0,
+                    tzinfo=timezone.utc,
+                )
+                if not time_bad and raw_scheduled_time is not None:
+                    fixed_time = raw_scheduled_time
+
+                cur.execute(
+                    """
+                    UPDATE interview_schedules
+                    SET candidate_name = %s,
+                        candidate_email = %s,
+                        scheduled_time = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    (pick_name or "Candidate", pick_email, fixed_time, row_id),
+                )
+                repaired += 1
+
+        if repaired:
+            conn.commit()
+        else:
+            conn.rollback()
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"[repair] skipped incomplete interview repair: {e}")
+    finally:
+        if conn:
+            conn.close()
+
 def process_batch_files(files_data: List[Dict], user_id: int):
     """Background task to process files and save to DB."""
     try:
@@ -121,24 +260,38 @@ async def analyze_resume(file: UploadFile = File(...), user_id: int = 1):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+class SentimentRequest(BaseModel):
+    resume_text: Optional[str] = None
+
 @app.post("/resume/sentiment")
-async def resume_sentiment(file: UploadFile = File(...)):
+async def resume_sentiment(file: Optional[UploadFile] = File(None), req_text: Optional[str] = None):
+    """
+    Analyze sentiment and summary of a resume.
+    Accepts either:
+    - file: multipart file upload
+    - req_text: raw resume text in query parameter
+    """
     try:
-        content = await file.read()
-        data = parse_resume(content, file.filename)
-        analysis = resume_agent.analyze_sentiment_and_summary(data['raw_text'])
-        return {"filename": file.filename, "analysis": analysis}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-class SentimentTextRequest(BaseModel):
-    resume_text: str
-
-@app.post("/resume/sentiment-text")
-def sentiment_text(req: SentimentTextRequest):
-    try:
-        analysis = resume_agent.analyze_sentiment_and_summary(req.resume_text)
-        return {"status": "success", "analysis": analysis}
+        resume_text = None
+        filename = None
+        
+        if file:
+            # File upload path
+            content = await file.read()
+            data = parse_resume(content, file.filename)
+            resume_text = data['raw_text']
+            filename = file.filename
+        elif req_text:
+            # Raw text path
+            resume_text = req_text
+            filename = "text_input"
+        else:
+            raise HTTPException(status_code=400, detail="Provide either file or req_text parameter")
+        
+        analysis = resume_agent.analyze_sentiment_and_summary(resume_text)
+        return {"filename": filename, "analysis": analysis, "status": "success"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -249,22 +402,73 @@ def match_resumes_to_jd(req: MatchRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # --- Phase 3: Scheduling ---
+def _is_placeholder_candidate_name(name: Optional[str]) -> bool:
+    value = (name or "").strip().lower()
+    return value in ("", "candidate", "unknown", "n/a", "na", "-")
+
+
+def _resolve_candidate_payload(candidate_email: str, candidate_name: Optional[str]) -> Dict[str, str]:
+    normalized_email = (candidate_email or "").strip().lower()
+    if not normalized_email:
+        raise HTTPException(status_code=400, detail="Candidate email is required")
+
+    if not _is_placeholder_candidate_name(candidate_name):
+        return {"email": normalized_email, "name": str(candidate_name).strip()}
+
+    resolved_name = ""
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT candidate_name
+                FROM resume_data
+                WHERE LOWER(TRIM(email)) = %s
+                  AND candidate_name IS NOT NULL
+                  AND TRIM(candidate_name) <> ''
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (normalized_email,),
+            )
+            row = cur.fetchone()
+            if row and row[0] and str(row[0]).strip():
+                resolved_name = str(row[0]).strip()
+    except Exception:
+        # Best-effort name enrichment; scheduler has additional fallback logic.
+        resolved_name = ""
+    finally:
+        if conn:
+            conn.close()
+
+    if not resolved_name:
+        local_part = normalized_email.split("@", 1)[0].strip().lower()
+        if local_part:
+            resolved_name = " ".join(
+                part
+                for part in local_part.replace(".", " ").replace("_", " ").replace("-", " ").split()
+                if part
+            ).title()
+
+    return {"email": normalized_email, "name": resolved_name or "Candidate"}
+
+
 class ScheduleRequest(BaseModel):
     candidate_email: str
-    candidate_name: str
+    candidate_name: Optional[str] = None
     interviewer_id: int
     slot_iso: str
 
 @app.post("/interview/schedule")
 def schedule_interview(req: ScheduleRequest):
     try:
-        # Construct dict expected by service
-        candidate_data = {"email": req.candidate_email, "name": req.candidate_name}
+        candidate_data = _resolve_candidate_payload(req.candidate_email, req.candidate_name)
         interview_id, created_new = scheduler.schedule_interview(candidate_data, req.interviewer_id, req.slot_iso)
         if created_new:
             log_phase_completion(
                 "Interview Scheduling",
-                f"candidate={req.candidate_email} interview_id={interview_id}",
+                f"candidate={candidate_data['email']} interview_id={interview_id}",
             )
             return {"status": "scheduled", "interview_id": interview_id}
 
@@ -283,7 +487,8 @@ def get_availability(interviewer_id: int, date: str):
 
 class SlotOptionsRequest(BaseModel):
     interviewer_ids: List[int]
-    days_ahead: int = 2
+    days_ahead: int = 1
+    search_window_days: int = 3
     num_options: int = 5
 
 @app.post("/interview/slot-options")
@@ -291,7 +496,10 @@ def get_slot_options(req: SlotOptionsRequest):
     """Return cross-matched slot options for a panel of interviewers."""
     try:
         slots = scheduler.generate_candidate_slot_options(
-            req.interviewer_ids, req.days_ahead, req.num_options
+            req.interviewer_ids,
+            req.days_ahead,
+            req.num_options,
+            req.search_window_days,
         )
         return {"slots": slots}
     except Exception as e:
@@ -323,19 +531,19 @@ def assign_panel(req: AssignPanelRequest):
 class RescheduleRequest(BaseModel):
     interview_id: int
     candidate_email: str
-    candidate_name: str
+    candidate_name: Optional[str] = None
     new_slot_iso: str
 
 @app.post("/interview/reschedule")
 def reschedule_interview(req: RescheduleRequest):
     """Re-schedule an existing interview to a new slot and re-notify the candidate."""
     try:
-        candidate_data = {"email": req.candidate_email, "name": req.candidate_name}
+        candidate_data = _resolve_candidate_payload(req.candidate_email, req.candidate_name)
         success = scheduler.reschedule_interview(req.interview_id, candidate_data, req.new_slot_iso)
         if success:
             log_phase_completion(
                 "Interview Rescheduling",
-                f"candidate={req.candidate_email} interview_id={req.interview_id}",
+                f"candidate={candidate_data['email']} interview_id={req.interview_id}",
             )
         return {"status": "rescheduled", "interview_id": req.interview_id}
     except Exception as e:
@@ -608,8 +816,20 @@ def get_interview_status_main():
     """Get comprehensive interview status for all candidates."""
     import traceback
     from backend.database import get_db_connection
+
+    def _derive_name_from_email(raw_email: Optional[str]) -> str:
+        email = (raw_email or "").strip().lower()
+        if "@" not in email:
+            return ""
+        local = email.split("@", 1)[0]
+        pretty = " ".join(local.replace(".", " ").replace("_", " ").replace("-", " ").split())
+        return pretty.title() if pretty else ""
+
     conn = None
     try:
+        # Keep dashboard resilient when n8n inserted placeholder interview rows.
+        _repair_incomplete_scheduled_interviews()
+
         print("--> DEBUG: Attempting to get DB connection for interview status...")
         conn = get_db_connection()
         from psycopg2.extras import RealDictCursor
@@ -637,10 +857,55 @@ def get_interview_status_main():
             rows = cur.fetchall()
             print(f"--> DEBUG: Found {len(rows)} interview rows")
 
+            missing_name_emails = sorted(
+                {
+                    str((r.get("candidate_email") or "")).strip().lower()
+                    for r in rows
+                    if str((r.get("candidate_email") or "")).strip()
+                    and (
+                        not str((r.get("candidate_name") or "")).strip()
+                        or str((r.get("candidate_name") or "")).strip().lower() == "candidate"
+                    )
+                }
+            )
+
+            resume_name_by_email = {}
+            if missing_name_emails:
+                cur.execute(
+                    """
+                    SELECT LOWER(TRIM(email)) AS normalized_email,
+                           MAX(NULLIF(TRIM(candidate_name), '')) AS resume_name
+                    FROM resume_data
+                    WHERE email IS NOT NULL
+                      AND TRIM(email) <> ''
+                      AND LOWER(TRIM(email)) = ANY(%s)
+                    GROUP BY LOWER(TRIM(email))
+                    """,
+                    (missing_name_emails,),
+                )
+                for r in cur.fetchall():
+                    normalized_email = str((r.get("normalized_email") or "")).strip().lower()
+                    resume_name = str((r.get("resume_name") or "")).strip()
+                    if normalized_email and resume_name and resume_name.lower() != "candidate":
+                        resume_name_by_email[normalized_email] = resume_name
+
         now = datetime.now(timezone.utc)
         interviews = []
         for row in rows:
             iv = dict(row)
+
+            email = str(iv.get("candidate_email") or "").strip().lower()
+            existing_name = str(iv.get("candidate_name") or "").strip()
+            if not existing_name or existing_name.lower() == "candidate":
+                iv["candidate_name"] = (
+                    resume_name_by_email.get(email)
+                    or _derive_name_from_email(email)
+                    or "Candidate"
+                )
+
+            if iv.get("scheduled_time") is None and iv.get("created_at") is not None:
+                iv["scheduled_time"] = iv.get("created_at")
+
             sched = iv['scheduled_time']
             original_status = (iv.get('interview_status') or '').strip().lower()
             # Normalise to UTC-aware datetime

@@ -1,8 +1,8 @@
 # v3: added send-shortlist, send-brevo endpoints
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List, Tuple
-from datetime import datetime
+from typing import Optional, List, Tuple, Dict
+from datetime import datetime, timezone, timedelta
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -48,6 +48,7 @@ class EmailRequest(BaseModel):
     name: Optional[str] = None
     interviewer_email: Optional[str] = None
     interviewer_name: Optional[str] = None
+    recipient_role: Optional[str] = "interviewer"
     # Extended fields for richer templates
     round_number: Optional[int] = 1
     round_label: Optional[str] = "Interview"
@@ -82,6 +83,19 @@ def _format_scheduled_time_for_email(raw_scheduled_time: Optional[str], tz_name:
         display_tz = pytz.timezone("UTC")
 
     value = str(raw_scheduled_time).strip()
+    lowered = value.lower()
+    invalid_markers = {
+        "invalid datetime",
+        "invalid date",
+        "nan",
+        "none",
+        "null",
+        "undefined",
+        "tbd",
+        "to be confirmed",
+    }
+    if lowered in invalid_markers:
+        return "To Be Confirmed"
 
     try:
         if value.endswith("Z"):
@@ -97,7 +111,9 @@ def _format_scheduled_time_for_email(raw_scheduled_time: Optional[str], tz_name:
 
         return dt_local.strftime("%d %b %Y, %I:%M %p (%Z)")
     except Exception:
-        # Preserve original text if parsing fails.
+        # Preserve readable free-text values but hide known invalid placeholders.
+        if any(marker in lowered for marker in ("invalid", "nan", "undefined", "none", "null")):
+            return "To Be Confirmed"
         return str(raw_scheduled_time)
 
 def _skip_response():
@@ -129,6 +145,382 @@ def _normalize_name(*values: Optional[str], default: str = "Candidate") -> str:
         if text:
             return text
     return default
+
+
+def _derive_name_from_email(email: Optional[str], default: str = "Candidate") -> str:
+    """Build a readable fallback name from email local-part."""
+    if not email:
+        return default
+    local = str(email).split("@", 1)[0].strip().lower()
+    if not local:
+        return default
+    pretty = " ".join(
+        part for part in local.replace(".", " ").replace("_", " ").replace("-", " ").split() if part
+    )
+    return pretty.title() if pretty else default
+
+
+def _lookup_candidate_name_from_db(email: Optional[str]) -> Optional[str]:
+    """Look up the real candidate name from resume_data or interview_schedules by email."""
+    if not email:
+        return None
+    try:
+        from backend.database import get_db_connection
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # Try resume_data first (most reliable source of parsed names)
+                cur.execute(
+                    "SELECT candidate_name FROM resume_data WHERE LOWER(TRIM(email)) = %s AND candidate_name IS NOT NULL AND TRIM(candidate_name) != '' ORDER BY created_at DESC LIMIT 1",
+                    (email.strip().lower(),),
+                )
+                row = cur.fetchone()
+                if row and row[0] and row[0].strip():
+                    return row[0].strip()
+
+                # Fallback: try candidates table
+                cur.execute(
+                    "SELECT name FROM candidates WHERE LOWER(TRIM(email)) = %s AND name IS NOT NULL AND TRIM(name) != '' LIMIT 1",
+                    (email.strip().lower(),),
+                )
+                row = cur.fetchone()
+                if row and row[0] and row[0].strip():
+                    return row[0].strip()
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[email_router] DB lookup for candidate name failed: {e}")
+    return None
+
+
+def _resolve_candidate_name(candidate_name: Optional[str], candidate_email: Optional[str]) -> str:
+    """Resolve the best candidate name using all available sources."""
+    # 1. Use provided name if it's a real name
+    name = _normalize_name(candidate_name, default="")
+    if name and name.strip().lower() not in ("candidate", "unknown", ""):
+        return name
+
+    # 2. Look up from database by email
+    db_name = _lookup_candidate_name_from_db(candidate_email)
+    if db_name and db_name.strip().lower() not in ("candidate", "unknown", ""):
+        return db_name
+
+    # 3. Derive from email address
+    derived = _derive_name_from_email(candidate_email, default="")
+    if derived and derived.strip().lower() not in ("candidate", "unknown", ""):
+        return derived
+
+    return "Candidate"
+
+def _get_interview_context(interview_id: Optional[int]) -> Dict[str, Optional[str]]:
+    """Fetch candidate/interviewer/schedule fields from interview_schedules by id."""
+    if not interview_id:
+        return {}
+    try:
+        from backend.database import get_db_connection
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT s.candidate_name, s.candidate_email, s.scheduled_time,
+                           i.email AS interviewer_email, i.name AS interviewer_name
+                    FROM interview_schedules s
+                    LEFT JOIN interviewers i ON i.id = s.interviewer_id
+                    WHERE s.id = %s
+                    LIMIT 1
+                    """,
+                    (interview_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {}
+                return {
+                    "candidate_name": row[0],
+                    "candidate_email": row[1],
+                    "scheduled_time": row[2].isoformat() if row[2] else None,
+                    "interviewer_email": row[3],
+                    "interviewer_name": row[4],
+                }
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[email_router] interview context lookup failed: {e}")
+        return {}
+
+def _is_placeholder_candidate_name(name: Optional[str]) -> bool:
+    return str(name or "").strip().lower() in ("", "candidate", "unknown", "n/a", "na")
+
+
+def _parse_iso_datetime(raw_value: Optional[str]):
+    if not raw_value:
+        return None
+    try:
+        value = str(raw_value).strip()
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def _as_utc(dt_value: Optional[datetime]) -> Optional[datetime]:
+    if not dt_value:
+        return None
+    if dt_value.tzinfo is None:
+        return dt_value.replace(tzinfo=timezone.utc)
+    return dt_value.astimezone(timezone.utc)
+
+
+def _pick_future_slot(slot_options: Optional[List[str]]) -> Optional[str]:
+    if not slot_options:
+        return None
+    now = datetime.now(timezone.utc)
+    best = None
+    for slot in slot_options:
+        parsed = _as_utc(_parse_iso_datetime(slot))
+        if not parsed:
+            continue
+        if parsed > now and (best is None or parsed < best):
+            best = parsed
+    return best.isoformat() if best else None
+
+def _get_min_lead_hours() -> int:
+    raw = os.getenv("INTERVIEW_MIN_LEAD_HOURS", "24")
+    try:
+        return max(1, int(raw))
+    except Exception:
+        return 24
+
+
+def _generate_fallback_future_time(days_ahead: int = 1) -> str:
+    """Generate a fallback interview time 1+ days in the future at 10 AM UTC."""
+    future_time = datetime.now(timezone.utc) + timedelta(days=days_ahead)
+    # Set to 10 AM UTC on that day
+    future_time = future_time.replace(hour=10, minute=0, second=0, microsecond=0)
+    return future_time.isoformat()
+
+
+def _choose_best_scheduled_time(
+    context_time: Optional[str],
+    slot_options: Optional[List[str]],
+    request_time: Optional[str],
+) -> Optional[str]:
+    """
+    Choose a safe confirmed time.
+    - Must be in the future with a minimum lead window (24 hours by default).
+    - Prefer slot options generated by scheduling logic.
+    - Falls back to a generated future time if no valid options exist.
+    """
+    now = datetime.now(timezone.utc)
+    min_allow_hours = _get_min_lead_hours()
+    min_allowed = now + timedelta(hours=min_allow_hours)
+
+    def _ok(raw: Optional[str]) -> Optional[datetime]:
+        parsed = _as_utc(_parse_iso_datetime(raw))
+        return parsed if parsed and parsed >= min_allowed else None
+
+    # 1) Prefer explicit request time from scheduler/workflow payload.
+    request_dt = _ok(request_time)
+    if request_dt:
+        return request_dt.isoformat()
+
+    # 2) Then prefer earliest acceptable slot from slot options.
+    best_slot_dt = None
+    if slot_options:
+        for slot in slot_options:
+            parsed = _ok(slot)
+            if not parsed:
+                continue
+            if best_slot_dt is None or parsed < best_slot_dt:
+                best_slot_dt = parsed
+    if best_slot_dt:
+        return best_slot_dt.isoformat()
+
+    # 3) Finally use context only if it satisfies lead-time.
+    context_dt = _ok(context_time)
+    if context_dt:
+        return context_dt.isoformat()
+
+    # 4) If all else fails, generate a fallback time 1 day ahead
+    return _generate_fallback_future_time(days_ahead=1)
+
+
+def _get_interview_context_by_interviewer(interviewer_email: Optional[str]) -> Dict[str, Optional[str]]:
+    """
+    Fallback when workflow does not send interview_id.
+    Pull the nearest active upcoming schedule for the interviewer.
+    """
+    if not interviewer_email:
+        return {}
+    try:
+        from backend.database import get_db_connection
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT s.candidate_name, s.candidate_email, s.scheduled_time,
+                           i.email AS interviewer_email, i.name AS interviewer_name
+                    FROM interview_schedules s
+                    JOIN interviewers i ON i.id = s.interviewer_id
+                    WHERE LOWER(TRIM(i.email)) = LOWER(TRIM(%s))
+                      AND s.status IN ('scheduled', 'in_progress')
+                      AND s.scheduled_time >= NOW() - INTERVAL '15 minutes'
+                    ORDER BY s.scheduled_time ASC
+                    LIMIT 1
+                    """,
+                    (interviewer_email,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {}
+                return {
+                    "candidate_name": row[0],
+                    "candidate_email": row[1],
+                    "scheduled_time": row[2].isoformat() if row[2] else None,
+                    "interviewer_email": row[3],
+                    "interviewer_name": row[4],
+                }
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[email_router] interviewer context lookup failed: {e}")
+        return {}
+
+def _lookup_latest_shortlisted_candidate() -> Dict[str, Optional[str]]:
+    """Best-effort fallback when workflow omits candidate fields."""
+    try:
+        from backend.database import get_db_connection
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # Prioritize candidates marked as 'shortlisted' in interview_status
+                cur.execute(
+                    """
+                    SELECT candidate_name, email
+                    FROM resume_data
+                    WHERE email IS NOT NULL
+                      AND TRIM(email) <> ''
+                      AND interview_status = 'shortlisted'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+                if row:
+                    return {"candidate_name": row[0], "candidate_email": row[1]}
+
+                # Fallback to high AI scores if no explicit shortlist
+                cur.execute(
+                    """
+                    SELECT candidate_name, email
+                    FROM resume_data
+                    WHERE email IS NOT NULL
+                      AND TRIM(email) <> ''
+                      AND ai_score >= 60
+                    ORDER BY ai_score DESC, created_at DESC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+                if row:
+                    return {"candidate_name": row[0], "candidate_email": row[1]}
+
+                # Fallback to candidates table
+                cur.execute(
+                    """
+                    SELECT name, email
+                    FROM candidates
+                    WHERE email IS NOT NULL
+                      AND TRIM(email) <> ''
+                      AND resume_shortlisted = TRUE
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+                if row:
+                    return {"candidate_name": row[0], "candidate_email": row[1]}
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[email_router] shortlisted fallback lookup failed: {e}")
+    return {}
+
+
+def _repair_interview_row_from_invite(
+    interview_id: Optional[int],
+    interviewer_email: Optional[str],
+    candidate_name: Optional[str],
+    candidate_email: Optional[str],
+    scheduled_time_iso: Optional[str],
+):
+    """
+    Backfill missing interview_schedules fields from invite payload/context.
+    This keeps dashboard and email in sync when workflow sends partial fields.
+    """
+    try:
+        from backend.database import get_db_connection
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                target_id = interview_id
+                if not target_id and interviewer_email:
+                    cur.execute(
+                        """
+                        SELECT s.id
+                        FROM interview_schedules s
+                        JOIN interviewers i ON i.id = s.interviewer_id
+                        WHERE LOWER(TRIM(i.email)) = LOWER(TRIM(%s))
+                          AND s.status IN ('scheduled', 'in_progress')
+                        ORDER BY s.created_at DESC
+                        LIMIT 1
+                        """,
+                        (interviewer_email,),
+                    )
+                    row = cur.fetchone()
+                    target_id = row[0] if row else None
+
+                if not target_id:
+                    conn.rollback()
+                    return
+
+                cur.execute(
+                    """
+                    UPDATE interview_schedules
+                    SET
+                        candidate_name = CASE
+                            WHEN candidate_name IS NULL OR TRIM(candidate_name) = '' OR LOWER(TRIM(candidate_name)) IN ('candidate', 'unknown')
+                            THEN COALESCE(NULLIF(%s, ''), candidate_name)
+                            ELSE candidate_name
+                        END,
+                        candidate_email = CASE
+                            WHEN candidate_email IS NULL OR TRIM(candidate_email) = ''
+                            THEN COALESCE(NULLIF(%s, ''), candidate_email)
+                            ELSE candidate_email
+                        END,
+                        scheduled_time = CASE
+                            WHEN scheduled_time IS NULL
+                              OR scheduled_time <= NOW() + INTERVAL '30 minutes'
+                            THEN COALESCE(%s::timestamp, scheduled_time)
+                            ELSE scheduled_time
+                        END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    (
+                        (candidate_name or "").strip(),
+                        (candidate_email or "").strip().lower(),
+                        scheduled_time_iso,
+                        target_id,
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[email_router] interview row repair skipped: {e}")
 
 
 def _build_oa_launch_link(raw_oa_link: str, candidate_email: str, candidate_name: str) -> str:
@@ -350,24 +742,56 @@ def get_interview_reminder_email(req: EmailRequest):
 
 @router.post("/interview-invite", response_model=EmailResponse)
 def get_interview_invite_email(req: EmailRequest):
-    candidate_email = _normalize_email(req.candidate_email, req.email)
-    candidate_name = _normalize_name(req.candidate_name, req.name)
-    interviewer_email = _normalize_email(req.interviewer_email)
-    interviewer_name = _normalize_name(req.interviewer_name, "HR Team")
+    context = _get_interview_context(req.interview_id)
+    shortlist_fallback = _lookup_latest_shortlisted_candidate()
 
-    if not candidate_name:
+    candidate_email = _normalize_email(
+        req.candidate_email,
+        req.email,
+        context.get("candidate_email"),
+        shortlist_fallback.get("candidate_email"),
+    )
+    resolved_name = _resolve_candidate_name(
+        req.candidate_name
+        or req.name
+        or context.get("candidate_name")
+        or shortlist_fallback.get("candidate_name"),
+        candidate_email,
+    )
+    candidate_name = resolved_name
+    recipient_email = candidate_email
+    recipient_name = candidate_name
+
+    if not recipient_email:
         return _skip_response()
 
-    # Interview invite must go to interviewer/workspace inbox, not candidate inbox.
-    if not interviewer_email:
-        interviewer_email = _normalize_email(os.getenv("WORKSPACE_EMAIL"), "workspace3705@gmail.com")
-    if not interviewer_email:
+    # Never send if we still only have a placeholder candidate identity.
+    if _is_placeholder_candidate_name(candidate_name):
         return _skip_response()
 
     round_number = req.round_number or 1
     round_label = req.round_label or "Interview"
     interview_format = req.interview_format or "video call"
-    scheduled_time = _format_scheduled_time_for_email(req.scheduled_time, req.timezone)
+    source_scheduled_time = _choose_best_scheduled_time(
+        context_time=context.get("scheduled_time"),
+        slot_options=req.slot_options,
+        request_time=req.scheduled_time,
+    )
+    # source_scheduled_time should never be None now due to fallback
+    if not source_scheduled_time:
+        # Safety fallback - generate 1 day ahead at 10 AM
+        source_scheduled_time = _generate_fallback_future_time(days_ahead=1)
+
+    # Persist repaired values so dashboard reads corrected fields too.
+    _repair_interview_row_from_invite(
+        interview_id=req.interview_id,
+        interviewer_email=_normalize_email(req.interviewer_email, context.get("interviewer_email")),
+        candidate_name=candidate_name,
+        candidate_email=candidate_email,
+        scheduled_time_iso=source_scheduled_time,
+    )
+
+    scheduled_time = _format_scheduled_time_for_email(source_scheduled_time, req.timezone)
     meeting_section = (
         f'<p><strong>Meeting Link:</strong> <a href="{req.meeting_link}">{req.meeting_link}</a></p>'
         if req.meeting_link
@@ -385,62 +809,62 @@ def get_interview_invite_email(req: EmailRequest):
     html_body = f"""
     <!DOCTYPE html><html><body style="font-family:Arial,sans-serif;color:#333;">
     <div style="max-width:600px;margin:auto;padding:20px;">
-      <div style="background:linear-gradient(135deg,#667eea,#764ba2);color:white;padding:30px;border-radius:10px 10px 0 0;text-align:center;">
-                <h1>Interview Scheduled</h1>
-                <p style="font-size:18px;opacity:0.9;">Round {round_number}: {round_label}</p>
-      </div>
-      <div style="background:#f9fafb;padding:30px;border-radius:0 0 10px 10px;">
-                <p>Hi <strong>{interviewer_name}</strong>,</p>
-                <p>An interview has been scheduled and assigned to you.</p>
-
-        <table style="width:100%;border-collapse:collapse;margin:16px 0;">
-          <tr style="background:#edf2f7;">
-                        <td style="padding:8px 12px;font-weight:bold;">Candidate</td>
-                        <td style="padding:8px 12px;">{candidate_name}{' (' + candidate_email + ')' if candidate_email else ''}</td>
-                    </tr>
-                    <tr>
-            <td style="padding:8px 12px;font-weight:bold;">Format</td>
-            <td style="padding:8px 12px;">{interview_format.title()}</td>
-          </tr>
-                    <tr style="background:#edf2f7;">
-            <td style="padding:8px 12px;font-weight:bold;">Confirmed Time</td>
-            <td style="padding:8px 12px;">{scheduled_time}</td>
-          </tr>
-                    <tr>
-            <td style="padding:8px 12px;font-weight:bold;">Duration</td>
-            <td style="padding:8px 12px;">~60 minutes</td>
-          </tr>
-        </table>
-
-        {slots_html}
-        {meeting_section}
-
-                <h3 style="color:#4a5568;">Interviewer Notes</h3>
-        <ul>
-                    <li>Review candidate profile and role requirements before the call</li>
-                    <li>Cover technical / competency-based questions aligned to the role</li>
-                    <li>Submit feedback after the interview via the scorecard link</li>
-        </ul>
-
-        <div style="background:#ebf8ff;border-left:4px solid #4299e1;padding:12px;margin:16px 0;border-radius:4px;">
-                    <strong>Need to reschedule?</strong> Please coordinate with HR and update the calendar event.
+        <div style="background:linear-gradient(135deg,#0f766e,#14b8a6);color:white;padding:30px;border-radius:10px 10px 0 0;text-align:center;">
+            <h1>Your Interview Is Scheduled</h1>
+            <p style="font-size:18px;opacity:0.9;">Round {round_number}: {round_label}</p>
         </div>
+        <div style="background:#f9fafb;padding:30px;border-radius:0 0 10px 10px;">
+            <p>Hi <strong>{candidate_name}</strong>,</p>
+            <p>Your interview has been scheduled. Please join at the confirmed time below.</p>
 
-                <p>Thank you.</p>
-                <br><p>Best regards,<br><strong>HR Recruiting Team</strong></p>
-      </div>
-      <p style="text-align:center;font-size:12px;color:#888;margin-top:20px;">
-        This is an automated email from our recruitment system.
-      </p>
+            <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+                <tr style="background:#edf2f7;">
+                    <td style="padding:8px 12px;font-weight:bold;">Role</td>
+                    <td style="padding:8px 12px;">{req.job_title or req.position or req.role or 'Interview'}</td>
+                </tr>
+                <tr>
+                    <td style="padding:8px 12px;font-weight:bold;">Confirmed Time</td>
+                    <td style="padding:8px 12px;">{scheduled_time}</td>
+                </tr>
+                <tr style="background:#edf2f7;">
+                    <td style="padding:8px 12px;font-weight:bold;">Format</td>
+                    <td style="padding:8px 12px;">{interview_format.title()}</td>
+                </tr>
+                <tr>
+                    <td style="padding:8px 12px;font-weight:bold;">Interviewer</td>
+                    <td style="padding:8px 12px;">{_normalize_name(req.interviewer_name, context.get('interviewer_name'), default='HR Team')}</td>
+                </tr>
+            </table>
+
+            {slots_html}
+            {meeting_section}
+
+            <h3 style="color:#4a5568;">Join Instructions</h3>
+            <ul>
+                <li>Join a few minutes early to avoid delays</li>
+                <li>Keep your resume and notes ready</li>
+                <li>Use the calendar link or meeting link above to join</li>
+            </ul>
+
+            <div style="background:#ecfeff;border-left:4px solid #14b8a6;padding:12px;margin:16px 0;border-radius:4px;">
+                <strong>Need to reschedule?</strong> Reply to this email or contact HR as soon as possible.
+            </div>
+
+            <p>Thank you.</p>
+            <br><p>Best regards,<br><strong>HR Recruiting Team</strong></p>
+        </div>
+        <p style="text-align:center;font-size:12px;color:#888;margin-top:20px;">
+            This is an automated email from our recruitment system.
+        </p>
     </div>
     </body></html>
     """
 
     return {
-        "subject": f"Interview Scheduled – Round {round_number}: {round_label} ({candidate_name})",
+        "subject": f"Your Interview Is Scheduled – Round {round_number}: {round_label} ({candidate_name})",
         "body": html_body,
-        "recipient_email": interviewer_email,
-        "recipient_name": interviewer_name,
+        "recipient_email": recipient_email,
+        "recipient_name": recipient_name,
     }
 
 
@@ -467,6 +891,8 @@ class InterviewerKitResponse(BaseModel):
 @router.post("/interviewer-kit", response_model=InterviewerKitResponse)
 def get_interviewer_kit_email(req: InterviewerKitRequest):
     """Return the pre-interview kit email body for an interviewer."""
+    candidate_name = _resolve_candidate_name(req.candidate_name, req.candidate_email)
+
     pretty_scheduled_time = _format_scheduled_time_for_email(req.scheduled_time)
     feedback_url = req.feedback_form_url or "http://localhost:8000/feedback-form.html"
     jd_section = (
@@ -491,7 +917,7 @@ def get_interviewer_kit_email(req: InterviewerKitRequest):
         <table style="width:100%;border-collapse:collapse;margin:12px 0;">
           <tr style="background:#edf2f7;">
             <td style="padding:8px 12px;font-weight:bold;">Candidate</td>
-            <td style="padding:8px 12px;">{req.candidate_name} ({req.candidate_email})</td>
+                        <td style="padding:8px 12px;">{candidate_name} ({req.candidate_email})</td>
           </tr>
           <tr>
             <td style="padding:8px 12px;font-weight:bold;">Round</td>
@@ -540,7 +966,7 @@ def get_interviewer_kit_email(req: InterviewerKitRequest):
     """
 
     return {
-        "subject": f"Interview Kit: {req.candidate_name} – {req.round_label}",
+        "subject": f"Interview Kit: {candidate_name} – {req.round_label}",
         "body": html_body,
         "recipient_email": req.interviewer_email,
         "recipient_name": req.interviewer_name,

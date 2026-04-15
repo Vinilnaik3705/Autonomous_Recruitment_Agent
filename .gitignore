@@ -46,6 +46,8 @@ credentials.json
 Resume Dataset/
 uploads/
 docs/
+!project-doc/docs/
+!project-doc/docs/*.md
 test_results.txt
 
 # Debug outputs

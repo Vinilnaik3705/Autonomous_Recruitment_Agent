@@ -1,0 +1,29 @@
+site_name: Autonomous Recruitment Agent
+site_description: Technical documentation for the Autonomous Recruitment Agent platform
+site_url: http://localhost:8001
+repo_name: Vinilnaik3705/Autonomous_Recruitment_Agent
+repo_url: https://github.com/Vinilnaik3705/Autonomous_Recruitment_Agent
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Architecture: architecture.md
+  - Backend API: backend-api.md
+  - Workflows: workflows.md
+  - Troubleshooting: troubleshooting.md
+  - Current Status: status.md
+  - Challenges and Limitations: challenges-limitations.md
+  - About: about.md

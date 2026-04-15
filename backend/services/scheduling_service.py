@@ -190,25 +190,78 @@ class SchedulingService:
             start += timedelta(hours=1)
         return slots
 
+    def _normalize_slot_iso(self, slot_iso: str) -> datetime:
+        """Parse an incoming slot and normalize to UTC-aware datetime."""
+        raw = str(slot_iso or "").strip()
+        if not raw:
+            raise ValueError("slot_iso is required")
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        else:
+            parsed = parsed.astimezone(timezone.utc)
+        return parsed
+
     def generate_candidate_slot_options(
-        self, interviewer_ids: List[int], days_ahead: int = 2, num_options: int = 5
+        self,
+        interviewer_ids: List[int],
+        days_ahead: int = 1,
+        num_options: int = 5,
+        search_window_days: int = 3,
     ) -> List[str]:
         """
         Cross-match free slots across all panel members and return
-        up to `num_options` common slots starting from `days_ahead` days from now.
+        up to `num_options` common slots within the search window.
+        By default searches starting from 1 day ahead (not today).
         """
-        search_date = (datetime.utcnow() + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
-        all_slots: Optional[set] = None
+        if not interviewer_ids:
+            return []
 
-        for iid in interviewer_ids:
-            slots = set(self.get_availability(iid, search_date))
-            all_slots = slots if all_slots is None else all_slots & slots
+        now_utc = datetime.now(timezone.utc)
+        window_days = max(1, int(search_window_days or 1))
+        offset_days = max(1, int(days_ahead or 1))  # Ensure at least 1 day ahead
 
-        if not all_slots:
-            # Fallback: return default slots ignoring cross-match
-            return self._generate_default_slots(search_date, num_options)
+        collected: List[str] = []
+        for day_index in range(offset_days, offset_days + window_days):
+            search_date = (datetime.utcnow() + timedelta(days=day_index)).strftime("%Y-%m-%d")
+            all_slots: Optional[set] = None
 
-        return sorted(all_slots)[:num_options]
+            for iid in interviewer_ids:
+                slots = set(self.get_availability(iid, search_date))
+                all_slots = slots if all_slots is None else all_slots & slots
+
+            if not all_slots:
+                continue
+
+            for slot in sorted(all_slots):
+                try:
+                    slot_dt = self._normalize_slot_iso(slot)
+                except Exception:
+                    continue
+                # Never propose past slots.
+                if slot_dt > now_utc:
+                    collected.append(slot)
+                    if len(collected) >= num_options:
+                        return collected
+
+        if collected:
+            return collected[:num_options]
+
+        # Fallback: generate future defaults in the same window.
+        for day_index in range(offset_days, offset_days + window_days):
+            search_date = (datetime.utcnow() + timedelta(days=day_index)).strftime("%Y-%m-%d")
+            for slot in self._generate_default_slots(search_date, num_options):
+                try:
+                    slot_dt = self._normalize_slot_iso(slot)
+                except Exception:
+                    continue
+                if slot_dt > now_utc:
+                    collected.append(slot)
+                    if len(collected) >= num_options:
+                        return collected
+        return collected[:num_options]
 
     # ------------------------------------------------------------------
     # Scheduling core
@@ -234,6 +287,14 @@ class SchedulingService:
             normalized_email = (candidate_data.get("email") or "").strip().lower()
             if not normalized_email:
                 raise ValueError("Candidate email is required for scheduling")
+            resolved_candidate_name = self._resolve_candidate_name(
+                candidate_data.get("name") or candidate_data.get("candidate_name"),
+                normalized_email,
+            )
+            normalized_slot_dt = self._normalize_slot_iso(slot_iso)
+            if normalized_slot_dt <= datetime.now(timezone.utc) + timedelta(minutes=2):
+                raise ValueError("Scheduled slot must be at least 2 minutes in the future")
+            normalized_slot_iso = normalized_slot_dt.isoformat()
             lock_key = f"interview_schedule:{normalized_email}"
 
             with conn.cursor() as cur:
@@ -280,10 +341,10 @@ class SchedulingService:
                     RETURNING id
                     """,
                     (
-                        candidate_data["name"],
+                        resolved_candidate_name,
                         normalized_email,
                         interviewer_id,
-                        slot_iso,
+                        normalized_slot_iso,
                         google_event_id or "N/A",
                     ),
                 )
@@ -305,9 +366,9 @@ class SchedulingService:
                 self.send_interviewer_kit(
                     interviewer_email=interviewer_row[1],
                     interviewer_name=interviewer_row[0] or "Interviewer",
-                    candidate_name=candidate_data.get("name") or "Candidate",
+                    candidate_name=resolved_candidate_name,
                     candidate_email=normalized_email,
-                    scheduled_time=slot_iso,
+                    scheduled_time=normalized_slot_iso,
                     round_label=f"Round {round_number}: {round_label}",
                     meeting_link=meeting_link,
                     google_event_id=google_event_id,
@@ -355,10 +416,15 @@ class SchedulingService:
             conn.commit()
 
             if interviewer_row and interviewer_row[1]:
+                fallback_email = (existing_candidate_email or candidate_data.get("email") or "").strip().lower()
+                resolved_candidate_name = self._resolve_candidate_name(
+                    candidate_data.get("name") or candidate_data.get("candidate_name") or existing_candidate_name,
+                    fallback_email,
+                )
                 self.send_interviewer_kit(
                     interviewer_email=interviewer_row[1],
                     interviewer_name=interviewer_row[0] or "Interviewer",
-                    candidate_name=(candidate_data.get("name") or existing_candidate_name or "Candidate"),
+                    candidate_name=(resolved_candidate_name or existing_candidate_name or "Candidate"),
                     candidate_email=(candidate_data.get("email") or existing_candidate_email or ""),
                     scheduled_time=new_slot_iso,
                     round_label="Rescheduled Interview",
@@ -537,6 +603,46 @@ class SchedulingService:
         except Exception:
             return str(raw_slot)
 
+    def _lookup_candidate_name(self, email: str) -> Optional[str]:
+        """Look up the real candidate name from resume_data by email."""
+        if not email:
+            return None
+        try:
+            conn = get_db_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT candidate_name FROM resume_data WHERE LOWER(TRIM(email)) = %s AND candidate_name IS NOT NULL AND TRIM(candidate_name) != '' ORDER BY created_at DESC LIMIT 1",
+                        (email.strip().lower(),),
+                    )
+                    row = cur.fetchone()
+                    if row and row[0] and row[0].strip():
+                        return row[0].strip()
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"[scheduling] DB lookup for candidate name failed: {e}")
+        return None
+
+    def _resolve_candidate_name(self, raw_name: Optional[str], email: str) -> str:
+        """Resolve candidate name from input, DB fallback, then email local-part."""
+        resolved_name = (raw_name or "").strip()
+        normalized_email = (email or "").strip().lower()
+
+        if resolved_name.lower() in ("candidate", "unknown", ""):
+            resolved_name = self._lookup_candidate_name(normalized_email) or ""
+
+        if resolved_name.lower() in ("candidate", "unknown", "") and normalized_email:
+            local_part = normalized_email.split("@", 1)[0].strip().lower()
+            if local_part:
+                resolved_name = " ".join(
+                    part
+                    for part in local_part.replace(".", " ").replace("_", " ").replace("-", " ").split()
+                    if part
+                ).title()
+
+        return resolved_name or "Candidate"
+
     def send_invite_email(
         self,
         candidate: Dict,
@@ -624,6 +730,18 @@ class SchedulingService:
         if not email_config:
             return
 
+        resolved_candidate_name = (candidate_name or "").strip()
+        resolved_candidate_email = (candidate_email or "").strip().lower()
+        if resolved_candidate_name.lower() in ("candidate", "unknown", ""):
+            db_name = self._lookup_candidate_name(resolved_candidate_email)
+            if db_name and db_name.strip().lower() not in ("candidate", "unknown", ""):
+                resolved_candidate_name = db_name.strip()
+            elif resolved_candidate_email:
+                local_part = resolved_candidate_email.split("@", 1)[0]
+                resolved_candidate_name = " ".join(part for part in local_part.replace(".", " ").replace("_", " ").replace("-", " ").split() if part).title() or resolved_candidate_name
+        if not resolved_candidate_name:
+            resolved_candidate_name = "Candidate"
+
         if not feedback_form_url:
             base_url = self.secrets.get("app", {}).get("base_url", "http://localhost:8000")
             feedback_form_url = f"{base_url}/feedback-form.html"
@@ -650,7 +768,7 @@ class SchedulingService:
             <p>Hi <strong>{interviewer_name}</strong>,</p>
             <p>You have an upcoming interview. Here are the details:</p>
             <table style="width:100%;border-collapse:collapse;">
-              <tr><td style="padding:6px 0;"><strong>Candidate:</strong></td><td>{candidate_name} ({candidate_email})</td></tr>
+                            <tr><td style="padding:6px 0;"><strong>Candidate:</strong></td><td>{resolved_candidate_name} ({candidate_email})</td></tr>
               <tr><td style="padding:6px 0;"><strong>Round:</strong></td><td>{round_label}</td></tr>
                             <tr><td style="padding:6px 0;"><strong>Format:</strong></td><td>{interview_format.title()}</td></tr>
                             <tr><td style="padding:6px 0;"><strong>Scheduled Time:</strong></td><td>{formatted_time}</td></tr>
@@ -679,7 +797,7 @@ class SchedulingService:
         msg = MIMEMultipart("alternative")
         msg["From"] = email_config.get("sender_email", "")
         msg["To"] = interviewer_email
-        msg["Subject"] = f"Interview Kit: {candidate_name} – {round_label}"
+        msg["Subject"] = f"Interview Kit: {resolved_candidate_name} – {round_label}"
         msg.attach(MIMEText(html_body, "html"))
 
         self._smtp_send(msg, email_config)

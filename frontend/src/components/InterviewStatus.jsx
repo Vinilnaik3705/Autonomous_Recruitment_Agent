@@ -174,11 +174,25 @@ const InterviewStatus = () => {
   }, []);
 
   const formatDate = (ds) => {
-    if (!ds) return '-';
-    return new Date(ds).toLocaleString('en-US', {
+    if (!ds) return 'To be confirmed';
+    const parsed = new Date(ds);
+    if (Number.isNaN(parsed.getTime())) return 'To be confirmed';
+    return parsed.toLocaleString('en-US', {
       month: 'short', day: 'numeric', year: 'numeric',
       hour: '2-digit', minute: '2-digit'
     });
+  };
+
+  const formatCandidateName = (name, email) => {
+    const cleanedName = String(name || '').trim();
+    if (cleanedName && cleanedName.toLowerCase() !== 'candidate') return cleanedName;
+    const localPart = String(email || '').split('@')[0] || '';
+    const inferred = localPart
+      .replace(/[._-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+    return inferred || 'Candidate';
   };
 
   if (loading && !status) {
@@ -306,8 +320,8 @@ const InterviewStatus = () => {
                       <tr key={iv.interview_id} className="table-row-premium">
                         <td className="px-5 py-4">
                           <div className="flex items-center gap-3">
-                            <Avatar name={iv.candidate_name} color="#ef5807" />
-                            <span className="font-semibold text-gray-900">{iv.candidate_name}</span>
+                            <Avatar name={formatCandidateName(iv.candidate_name, iv.candidate_email)} color="#ef5807" />
+                            <span className="font-semibold text-gray-900">{formatCandidateName(iv.candidate_name, iv.candidate_email)}</span>
                           </div>
                         </td>
                         <td className="px-5 py-4">
@@ -350,8 +364,8 @@ const InterviewStatus = () => {
                       <tr key={iv.interview_id} className="table-row-premium">
                         <td className="px-5 py-4">
                           <div className="flex items-center gap-3">
-                            <Avatar name={iv.candidate_name} color="#0c87ff" />
-                            <span className="font-semibold text-gray-900">{iv.candidate_name}</span>
+                            <Avatar name={formatCandidateName(iv.candidate_name, iv.candidate_email)} color="#0c87ff" />
+                            <span className="font-semibold text-gray-900">{formatCandidateName(iv.candidate_name, iv.candidate_email)}</span>
                           </div>
                         </td>
                         <td className="px-5 py-4">
@@ -394,9 +408,9 @@ const InterviewStatus = () => {
                       <tr key={iv.interview_id} className="table-row-premium">
                         <td className="px-5 py-4">
                           <div className="flex items-center gap-3">
-                            <Avatar name={iv.candidate_name} color="#0c87ff" />
+                            <Avatar name={formatCandidateName(iv.candidate_name, iv.candidate_email)} color="#0c87ff" />
                             <div>
-                              <p className="font-semibold text-gray-900 leading-tight">{iv.candidate_name}</p>
+                              <p className="font-semibold text-gray-900 leading-tight">{formatCandidateName(iv.candidate_name, iv.candidate_email)}</p>
                               {iv.candidate_email && (
                                 <p className="text-xs text-gray-400">{iv.candidate_email}</p>
                               )}
@@ -439,9 +453,9 @@ const InterviewStatus = () => {
                       <tr key={iv.interview_id} className="table-row-premium">
                         <td className="px-5 py-4">
                           <div className="flex items-center gap-3">
-                            <Avatar name={iv.candidate_name} color="#6366f1" />
+                            <Avatar name={formatCandidateName(iv.candidate_name, iv.candidate_email)} color="#6366f1" />
                             <div>
-                              <p className="font-semibold text-gray-900 leading-tight">{iv.candidate_name}</p>
+                              <p className="font-semibold text-gray-900 leading-tight">{formatCandidateName(iv.candidate_name, iv.candidate_email)}</p>
                               {iv.candidate_email && (
                                 <p className="text-xs text-gray-400">{iv.candidate_email}</p>
                               )}

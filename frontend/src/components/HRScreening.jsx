@@ -66,7 +66,7 @@ const Sidebar = ({ activeTab, onTabChange, user }) => (
         </button>
       ))}
 
-      {user?.role === 'super_admin' && (
+      {user?.role === 'hr' && (
         <>
           <button className="v2-nav-item" title={collapsed ? 'Overview' : ''}>
             <LayoutDashboard className="w-5 h-5 flex-shrink-0" />
@@ -310,13 +310,11 @@ const HRScreening = () => {
     ]);
   }, []);
 
-  // Check if user is interviewer (restricted access)
-  const isInterviewer = auth.user?.role === 'interviewer';
   const isRecruiter = auth.user?.role === 'recruiter';
-  const isSuperAdmin = auth.user?.role === 'super_admin';
-  const canUploadResumes = isSuperAdmin || isRecruiter;
-  const canRunScreening = isSuperAdmin || isRecruiter;
-  const canWriteJD = isSuperAdmin || isRecruiter;
+  const isHR = auth.user?.role === 'hr';
+  const canUploadResumes = isHR || isRecruiter;
+  const canRunScreening = isHR || isRecruiter;
+  const canWriteJD = isHR || isRecruiter;
 
   /* --- drag & drop -------- */
   const handleDrop = useCallback((e) => {
@@ -555,7 +553,7 @@ const HRScreening = () => {
         setMatchResults(fallbackResults);
         setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
       } catch (fallbackErr) {
-        alert(`❌ All uploads failed. Troubleshooting:\n\n1. Check N8N is running at ${N8N_BASE}\n2. Verify the backend is running on port 8000\n3. Run START_DATABASE.ps1 to start all services\n\nFallback also failed: ${fallbackErr.message}`);
+        alert(`❌ All uploads failed. Troubleshooting:\n\n1. Check N8N is running at ${N8N_BASE}\n2. Verify the backend is running on port 8000\n3. Run 'docker compose up -d' to start all services\n\nFallback also failed: ${fallbackErr.message}`);
       } finally {
         setProcessing(false);
       }
@@ -709,37 +707,7 @@ const HRScreening = () => {
     );
   }
 
-  if (isInterviewer && activeTab === 'screening') {
-    return (
-      <div className="min-h-screen bg-[#f5f7fb] flex flex-col pt-20">
-        <TopBar
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-          user={auth.user}
-          onLogout={auth.logout}
-          notifications={notifications}
-          showNotifs={showNotifs}
-          setShowNotifs={setShowNotifs}
-        />
-        <div className="flex flex-1">
-          <Sidebar activeTab={activeTab} onTabChange={setActiveTab} user={auth.user} />
-          <div className="v2-main">
-            <div className="v2-content-container">
-              <div className="glass-card !rounded-[2rem] p-8 border-white/40 shadow-xl flex items-center gap-6 animate-fade-up">
-                <div className="w-16 h-16 rounded-2xl bg-orange-500/10 flex items-center justify-center flex-shrink-0">
-                  <Lock className="w-8 h-8 text-orange-600" />
-                </div>
-                <div className="space-y-1">
-                  <p className="text-lg font-black text-gray-900 tracking-tight">Interviewer Protocol Active</p>
-                  <p className="text-sm text-gray-500 font-medium">You have read-only access to assigned candidates. Please visit the <span className="text-orange-500 font-bold">Interviews</span> tab to manage your pipeline.</p>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
+
 
   return (
     <div className="min-h-screen bg-[#f5f7fb] flex flex-col pt-20">
@@ -772,22 +740,7 @@ const HRScreening = () => {
                   </p>
                 </div>
 
-                <div className="flex items-center gap-2 p-1 bg-gray-100 rounded-2xl border border-gray-200">
-                  <button
-                    onClick={() => setActiveTab('screening')}
-                    className={`px-6 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${activeTab === 'screening' ? 'bg-white text-gray-900 shadow-md' : 'text-gray-400 hover:text-gray-600'
-                      }`}
-                  >
-                    Screening
-                  </button>
-                  <button
-                    onClick={() => setActiveTab('interviews')}
-                    className={`px-6 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${activeTab === 'interviews' ? 'bg-white text-gray-900 shadow-md' : 'text-gray-400 hover:text-gray-600'
-                      }`}
-                  >
-                    Interviews
-                  </button>
-                </div>
+
               </div>
             )}
 

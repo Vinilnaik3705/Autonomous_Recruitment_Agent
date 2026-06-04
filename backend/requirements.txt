@@ -11,7 +11,7 @@ openai
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
-toml
+python-dotenv
 pytz
 scikit-learn
 numpy
@@ -19,3 +19,9 @@ sentence-transformers
 requests
 tf-keras
 PyJWT
+celery
+redis
+pydantic-settings
+prometheus-fastapi-instrumentator
+firebase-admin
+

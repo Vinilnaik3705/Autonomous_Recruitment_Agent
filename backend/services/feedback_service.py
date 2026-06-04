@@ -1,7 +1,7 @@
 from typing import Dict
 import json
 from backend.database import get_db_connection
-from backend.services.scheduling_service import SchedulingService # For email reuse potentially
+from backend.services.scheduling_service import SchedulingService                              
 
 class FeedbackService:
     def submit_feedback(self, interview_id: int, feedback_data: Dict):
@@ -22,8 +22,7 @@ class FeedbackService:
                     feedback_data.get('recommendation'),
                     feedback_data.get('detailed_feedback')
                 ))
-                
-                # Update status
+
                 cur.execute("UPDATE interview_schedules SET status='completed', feedback_submitted=TRUE WHERE id=%s", (interview_id,))
                 conn.commit()
                 return True

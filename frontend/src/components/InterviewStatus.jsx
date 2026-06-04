@@ -1,10 +1,10 @@
-﻿import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Calendar, CheckCircle, Clock, XCircle, User, Mail,
   Star, MessageSquare, RefreshCw, TrendingUp, Award,
   AlertCircle, Zap, Radio, ClipboardCheck, Rocket, Settings as SettingsIcon, ChevronLeft
 } from 'lucide-react';
-import { getInterviewStatus, clearAllInterviews } from '../api';
+import { getInterviewStatus, clearAllInterviews } from '@/lib/api';
 import SettingsPage from './Settings';
 
 /* --- Stat card --- */
@@ -232,10 +232,6 @@ const InterviewStatus = () => {
           <p className="text-gray-400 text-sm max-w-xs">
             Shortlist candidates from the Screening tab to automatically schedule interviews.
           </p>
-        </div>
-        <div className="section-chip section-chip-blue">
-          <Zap className="w-3.5 h-3.5" />
-          Powered by AI scheduling
         </div>
       </div>
     );

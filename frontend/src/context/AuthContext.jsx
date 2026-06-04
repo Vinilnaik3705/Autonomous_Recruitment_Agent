@@ -1,16 +1,37 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 
 const AuthContext = createContext(null);
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
+const API_BASE_URL = (typeof window !== "undefined"
+  ? (import.meta.env.VITE_API_BASE_URL || '/api')
+  : (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000')
+).replace(/\/$/, '');
+const PUBLIC_ACCESS = String(import.meta.env.VITE_PUBLIC_ACCESS ?? 'true').toLowerCase() === 'true';
+
+const publicUser = {
+  id: 0,
+  username: 'public_user',
+  email: 'public@recruitment.local',
+  role: 'hr',
+  permissions: [
+    'upload_resumes', 'write_jd', 'upload_jd', 'run_screening',
+    'view_scores', 'manage_interviews', 'submit_feedback',
+    'view_analytics', 'manage_users', 'manage_settings', 'view_audit_log',
+    'upload_resume', 'check_status'
+  ]
+};
 
 export const AuthProvider = ({ children }) => {
-  const [user, setUser] = useState(null);
+  const [user, setUser] = useState(PUBLIC_ACCESS ? publicUser : null);
   const [token, setToken] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!PUBLIC_ACCESS);
   const [error, setError] = useState(null);
 
   // Initialize auth from localStorage on mount
   useEffect(() => {
+    if (PUBLIC_ACCESS) {
+      setLoading(false);
+      return;
+    }
     const storedToken = localStorage.getItem('auth_token');
     const storedUser = localStorage.getItem('auth_user');
 
@@ -23,6 +44,11 @@ export const AuthProvider = ({ children }) => {
 
   // Login user
   const login = async (email, password) => {
+    if (PUBLIC_ACCESS) {
+      setUser(publicUser);
+      setToken('public-access');
+      return { user: publicUser };
+    }
     setLoading(true);
     setError(null);
     try {
@@ -67,6 +93,11 @@ export const AuthProvider = ({ children }) => {
 
   // Register new user
   const register = async (username, email, password, role = 'recruiter') => {
+    if (PUBLIC_ACCESS) {
+      setUser(publicUser);
+      setToken('public-access');
+      return { user: publicUser };
+    }
     setLoading(true);
     setError(null);
     try {
@@ -111,6 +142,7 @@ export const AuthProvider = ({ children }) => {
 
   // Logout user
   const logout = () => {
+    if (PUBLIC_ACCESS) return;
     localStorage.removeItem('auth_token');
     localStorage.removeItem('auth_user');
     setToken(null);
@@ -119,6 +151,7 @@ export const AuthProvider = ({ children }) => {
 
   // Refresh token
   const refreshToken = async () => {
+    if (PUBLIC_ACCESS) return { user: publicUser };
     if (!token) return;
 
     try {
@@ -153,6 +186,7 @@ export const AuthProvider = ({ children }) => {
 
   // Check if user has a specific role
   const hasRole = (requiredRole) => {
+    if (PUBLIC_ACCESS) return true;
     if (!user) return false;
     if (Array.isArray(requiredRole)) {
       return requiredRole.includes(user.role);
@@ -162,24 +196,32 @@ export const AuthProvider = ({ children }) => {
 
   // Check if user has a specific permission
   const hasPermission = (permission) => {
+    if (PUBLIC_ACCESS) return true;
     if (!user || !user.permissions) return false;
     return user.permissions.includes(permission);
   };
 
   // Check if user has any of the required permissions
   const hasAnyPermission = (permissions) => {
+    if (PUBLIC_ACCESS) return true;
     if (!user || !user.permissions) return false;
     return permissions.some(p => user.permissions.includes(p));
   };
 
   // Check if user has all of the required permissions
   const hasAllPermissions = (permissions) => {
+    if (PUBLIC_ACCESS) return true;
     if (!user || !user.permissions) return false;
     return permissions.every(p => user.permissions.includes(p));
   };
 
   // Social login/register
   const loginSocial = async (credential, provider, role = 'recruiter', mode = 'login') => {
+    if (PUBLIC_ACCESS) {
+      setUser(publicUser);
+      setToken('public-access');
+      return { user: publicUser };
+    }
     setLoading(true);
     setError(null);
     try {
@@ -236,6 +278,7 @@ export const AuthProvider = ({ children }) => {
     hasAnyPermission,
     hasAllPermissions,
     isAuthenticated: !!user && !!token
+      || PUBLIC_ACCESS
   };
 
   return (

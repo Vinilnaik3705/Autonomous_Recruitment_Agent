@@ -1,6 +1,9 @@
 import axios from 'axios';
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
+const API_BASE_URL = (typeof window !== "undefined"
+  ? (import.meta.env.VITE_API_BASE_URL || '/api')
+  : (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000')
+).replace(/\/$/, '');
 
 // Simple client-side cache for GET requests
 const requestCache = {
@@ -165,25 +168,36 @@ export const getInterviewStatus = async (forceFresh = false) => {
     return promise;
 };
 
-export const getNotifications = async () => {
-    const cacheKey = getCacheKey('/notifications');
+export const getNotifications = async (params = {}) => {
+    const limit = params.limit ?? 50;
+    const offset = params.offset ?? 0;
+    const unreadOnly = params.unread_only ?? false;
+    const cacheKey = getCacheKey(`/notifications?limit=${limit}&offset=${offset}&unread=${unreadOnly}`);
     
-    // Check if we have a cached response within TTL
     const cached = getCachedResponse(cacheKey);
     if (cached) {
         return cached;
     }
     
-    // Check if a request is already in flight
     if (requestCache.inFlight[cacheKey]) {
         return requestCache.inFlight[cacheKey];
     }
     
-    // Make the request and track it
-    const promise = api.get('/notifications').then(res => res.data);
+    const promise = api.get('/notifications', { params: { limit, offset, unread_only: unreadOnly } }).then((res) => {
+        const data = res.data;
+        if (Array.isArray(data)) {
+            return { items: data, total: data.length, unread: data.filter((n) => !n.read).length, limit, offset };
+        }
+        return data;
+    });
     requestCache.inFlight[cacheKey] = promise;
     
     return promise;
+};
+
+export const markAllNotificationsRead = async () => {
+    const response = await api.patch('/notifications/read-all');
+    return response.data;
 };
 
 export const clearAllInterviews = async () => {

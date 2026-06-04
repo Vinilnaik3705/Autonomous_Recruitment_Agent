@@ -1,0 +1,1113 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 10
+            }
+          ]
+              "value": "={{ $env.BREVO_API_KEY }}"
+      },
+      "id": "7e8610f2-aac2-407d-bb09-e0044f53676e",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        -21648,
+        68192
+      ]
+    },
+              "value": "={{ $env.BREVO_API_KEY }}"
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "schedule-interviews",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "9cdfc8fa-09af-4680-bdde-e1fc26d705e1",
+      "name": "Webhook Trigger1",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -21648,
+        68000
+      ],
+      "webhookId": "schedule-interviews-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const webhookData = $input.first().json.body || $input.first().json;\nconst rawCandidates = webhookData.shortlisted_candidates || webhookData.oa_scores_shortlisted_candidates || [];\nconst workspaceEmail = 'workspace3705@gmail.com';\n\nconst normalizeEmail = (candidate) => String(candidate?.candidate_email || candidate?.email || '').trim().toLowerCase();\nconst normalizeName = (candidate) => String(candidate?.candidate_name || candidate?.name || candidate?.full_name || '').trim();\n\nconst seen = new Set();\nreturn rawCandidates\n  .filter((candidate) => {\n    const email = normalizeEmail(candidate);\n    if (!email) return false;\n    if (email === workspaceEmail.toLowerCase()) return false;\n    if (seen.has(email)) return false;\n    seen.add(email);\n    return true;\n  })\n  .map((candidate) => {\n    const rawScore = candidate.resume_score ?? candidate.ai_score ?? candidate.score ?? 0;\n    const resumeScore = Number(rawScore) || 0;\n    return {\n      json: {\n        ...candidate,\n        candidate_email: normalizeEmail(candidate),\n        candidate_name: normalizeName(candidate) || 'Candidate',\n        ai_score: resumeScore,\n        resume_score: resumeScore,\n        _source: 'webhook'\n      }\n    };\n  });"
+      },
+      "id": "963b6a0e-a6d7-4824-a260-c7e56bed6075",
+      "name": "Extract Webhook Candidates1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -21408,
+        68000
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT ON (email) *, 'schedule' AS _source FROM resume_data WHERE (interview_status = 'SHORTLISTED' OR interview_status = 'NEXT_ROUND' OR interview_status = 'TECHNICAL_PASSED') AND email IS NOT NULL AND email != '' AND LOWER(email) != 'workspace3705@gmail.com' AND NOT EXISTS (SELECT 1 FROM interview_schedules WHERE interview_schedules.candidate_email = resume_data.email AND interview_schedules.status = 'scheduled') ORDER BY email, ai_score DESC;",
+        "options": {}
+      },
+      "id": "177ec34a-0380-450c-9c68-8bc1236ecaed",
+      "name": "Fetch Shortlisted Candidates1",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -21408,
+        68192
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "B3kNQnCoweGn6nNh",
+          "name": "Postgres account"
+        }
+      }
+              "value": "={{ $env.BREVO_API_KEY }}"
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ ($json.webhookUrl ? 'webhook' : ($json._source || 'schedule')).toString() }}",
+              "operation": "equal",
+              "value2": "webhook"
+            }
+          ]
+              "value": "={{ $env.BREVO_API_KEY }}"
+      },
+      "id": "70821c77-a148-4fcc-ac27-e6305a2c5df2",
+      "name": "If Webhook Source1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -20688,
+        67792
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "8775234a-fa59-4183-816e-4882f3666969",
+      "name": "Split Candidates1",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -20912,
+        68080
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({\n  success: true,\n  message: 'Interview scheduling request accepted',\n  queued_candidates: (($json.body?.shortlisted_candidates || $json.body?.oa_scores_shortlisted_candidates || []).length),\n  source: 'webhook'\n}) }}",
+        "options": {}
+      },
+      "id": "0829ddd6-a286-4ee6-876c-4c22f9d82683",
+      "name": "Respond to Webhook1",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        -20464,
+        67792
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\nconst candidate = $input.first().json || {};\nconst candidateEmail = String(candidate.candidate_email || candidate.email || '').trim().toLowerCase();\n\nif (!candidateEmail ||\n    candidateEmail === 'workspace3705@gmail.com' ||\n    !candidateEmail.includes('@') ||\n    candidateEmail.length < 5) {\n  // Pass through without overwriting staticData\n  return [{ json: staticData.currentCandidate ? { ...staticData.currentCandidate } : { skipped: true, reason: 'No valid candidate email' } }];\n}\n\nconst inferredName = candidateEmail\n  ? candidateEmail.split('@')[0].replace(/[._-]+/g, ' ').replace(/\\s+/g, ' ').trim().replace(/\\b\\w/g, (c) => c.toUpperCase())\n  : '';\nconst rawName = String(candidate.candidate_name || candidate.name || candidate.full_name || '').trim();\nconst normalizedCandidate = {\n  ...candidate,\n  candidate_email: candidateEmail,\n  candidate_name: rawName && rawName.toLowerCase() !== 'candidate' && rawName.toLowerCase() !== 'hr team' ? rawName : inferredName || 'Candidate',\n};\n\nstaticData.currentCandidate = normalizedCandidate;\nreturn [{ json: normalizedCandidate }];"
+      },
+      "id": "eff2e5d6-26cf-479d-b5ca-0b902e977577",
+      "name": "Store Candidate1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -20464,
+        68096
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "calendar": {
+          "__rl": true,
+          "value": "workspace3705@gmail.com",
+          "mode": "id"
+        },
+        "options": {
+          "timeMin": "={{ DateTime.now().setZone('Asia/Kolkata').startOf('day').toUTC().toISO() }}",
+          "timeMax": "={{ DateTime.now().setZone('Asia/Kolkata').plus({days: 2}).endOf('day').toUTC().toISO() }}"
+        }
+      },
+      "id": "03beedce-0154-4aa5-91ad-bbc38b959dd6",
+      "name": "Check Interviewer Availability1",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1,
+      "position": [
+        -20224,
+        68096
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "y706IbcZ0QpTFZRV",
+          "name": "Google Calendar account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const workspaceEmail = 'workspace3705@gmail.com';\nconst staticData = $getWorkflowStaticData('global');\n\nconst isValid = (r) => {\n  const e = String(r?.candidate_email || r?.email || '').trim().toLowerCase();\n  return e.length >= 5 && e.includes('@') && e !== workspaceEmail.toLowerCase();\n};\n\nconst toTitle = (s) => String(s || '').replace(/[._-]+/g, ' ').replace(/\\s+/g, ' ').trim().replace(/\\b\\w/g, (c) => c.toUpperCase());\n\nconst inputRows = ($input.all() || []).map((i) => i.json || {});\n\n// PRIORITY 1: staticData set by Store Candidate — most reliable\nlet candidate = (staticData.currentCandidate && isValid(staticData.currentCandidate))\n  ? staticData.currentCandidate\n  : null;\n\n// PRIORITY 2: any valid row in input (not calendar events)\nif (!candidate) {\n  candidate = inputRows.find((r) => isValid(r)) || null;\n}\n\nif (!candidate || !isValid(candidate)) {\n  return [{ json: { skipped: true, reason: 'Invalid or missing candidate context' } }];\n}\n\n// Persist back in case it was resolved from input\nstaticData.currentCandidate = candidate;\n\nconst busyEvents = inputRows.filter((evt) => {\n  const s = evt?.start?.dateTime || evt?.start?.date;\n  const e = evt?.end?.dateTime || evt?.end?.date;\n  return Boolean(s && e);\n});\n\nconst candidateEmail = String(candidate.candidate_email || candidate.email || '').trim().toLowerCase();\nconst inferredName = candidateEmail ? toTitle(candidateEmail.split('@')[0]) : '';\nconst rawCandidateName = String(candidate.candidate_name || candidate.name || candidate.full_name || '').trim();\nconst candidateName = rawCandidateName && !/^(candidate|undefined|null|hr team)$/i.test(rawCandidateName) ? rawCandidateName : (inferredName || 'Unknown');\nconst resumeScore = Number(candidate.resume_score ?? candidate.ai_score ?? 0) || 0;\nconst interviewer = { id: 1, name: 'HR Team', email: workspaceEmail };\n\nconst IST_OFFSET = 5.5 * 60 * 60 * 1000;\nlet interviewTime = new Date(Date.now() + IST_OFFSET);\ninterviewTime.setUTCDate(interviewTime.getUTCDate() + 1);\ninterviewTime.setUTCHours(4, 0, 0, 0); // 09:30 IST workday anchor\n\nlet found = false;\nlet attempts = 0;\nwhile (!found && attempts < 240) {\n  attempts++;\n  const istDay = new Date(interviewTime.getTime() + IST_OFFSET).getUTCDay();\n  if (istDay === 0 || istDay === 6) {\n    interviewTime.setUTCDate(interviewTime.getUTCDate() + 1);\n    interviewTime.setUTCHours(4, 0, 0, 0);\n    continue;\n  }\n\n  const slotStart = interviewTime.getTime();\n  const slotEnd = slotStart + 2700000;\n  const conflict = busyEvents.some((evt) => {\n    const start = new Date(evt?.start?.dateTime || evt?.start?.date).getTime();\n    const end = new Date(evt?.end?.dateTime || evt?.end?.date).getTime();\n    if (!Number.isFinite(start) || !Number.isFinite(end)) return false;\n    return slotStart < end && slotEnd > start;\n  });\n\n  if (!conflict) {\n    found = true;\n  } else {\n    interviewTime = new Date(interviewTime.getTime() + 60 * 60 * 1000);\n    const istHour = new Date(interviewTime.getTime() + IST_OFFSET).getUTCHours();\n    if (istHour >= 17) {\n      interviewTime.setUTCDate(interviewTime.getUTCDate() + 1);\n      interviewTime.setUTCHours(4, 0, 0, 0);\n    }\n  }\n}\n\nif (!found) {\n  interviewTime.setUTCDate(interviewTime.getUTCDate() + 1);\n  interviewTime.setUTCHours(4, 0, 0, 0);\n  while (true) {\n    const istDay = new Date(interviewTime.getTime() + IST_OFFSET).getUTCDay();\n    if (istDay !== 0 && istDay !== 6) break;\n    interviewTime.setUTCDate(interviewTime.getUTCDate() + 1);\n    interviewTime.setUTCHours(4, 0, 0, 0);\n  }\n}\n\nconst endTime = new Date(interviewTime.getTime() + 2700000);\n\nreturn [{\n  json: {\n    ...candidate,\n    skipped: false,\n    candidate_email: candidateEmail,\n    candidate_name: candidateName,\n    ai_score: resumeScore,\n    resume_score: resumeScore,\n    round_number: 1,\n    round_label: 'HR Round',\n    interview_format: 'video call',\n    interviewerId: interviewer.id,\n    interviewerName: interviewer.name,\n    interviewerEmail: interviewer.email,\n    interviewer_count: 1,\n    scheduling_warning: found ? null : 'Fallback slot assigned.',\n    calendar_warning: busyEvents.length ? null : 'No calendar data; slot chosen without conflict check.',\n    meetingTitle: `Interview with ${candidateName} (HR Round)`,\n    audit_start: interviewTime.toISOString(),\n    audit_end: endTime.toISOString()\n  }\n}];"
+      },
+      "id": "5c6433d9-72dd-45b1-9e59-9d4e009867dc",
+      "name": "Calculate Interview Slot1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -19984,
+        68096
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.skipped === true }}"
+            }
+          ]
+        }
+      },
+      "id": "2ede33bb-55ab-4f7a-8e0a-1020df8857c1",
+      "name": "Is Valid Candidate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -19744,
+        68096
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "calendar": {
+          "__rl": true,
+          "value": "workspace3705@gmail.com",
+          "mode": "id"
+        },
+        "start": "={{ $json.audit_start }}",
+        "end": "={{ $json.audit_end }}",
+        "additionalFields": {
+          "attendees": [
+            "={{ ($json.interviewerEmail || 'workspace3705@gmail.com').toLowerCase().trim() }}"
+          ],
+          "conferenceDataUi": {
+            "conferenceDataValues": {
+              "conferenceSolution": "hangoutsMeet"
+            }
+          },
+          "description": "={{ 'Round ' + ($json.round_number || 1) + ' - ' + ($json.round_label || 'Interview') + '\\n\\nCandidate: ' + $json.candidate_name + ' (' + $json.candidate_email + ')\\nRole: ' + ($json.job_title || $json.position || $json.role || $json.role_title || 'N/A') + '\\nResume Score: ' + ($json.resume_score ?? $json.ai_score ?? 'N/A') + '\\nInterviewer: ' + $json.interviewerName + '\\nFormat: ' + $json.interview_format + '\\n\\nFeedback form: ' + ((($json.public_app_base_url || $json.app_base_url || $json.feedback_base_url || 'http://127.0.0.1:8000')).replace(/\\\/$/, '') + '/feedback-form.html') }}",
+          "sendUpdates": "all",
+          "summary": "={{ 'Interview with ' + $json.candidate_name + ' - ' + ($json.job_title || $json.position || $json.role || $json.role_title || 'Role') + ' (' + ($json.round_label || 'HR Round') + ')' }}"
+        }
+      },
+      "id": "503ba208-27bc-4296-b067-0636a6dee1c9",
+      "name": "Create Google Calendar Event1",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1,
+      "position": [
+        -19504,
+        67872
+      ],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "y706IbcZ0QpTFZRV",
+          "name": "Google Calendar account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/email/interview-invite",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  candidate_email: (((($('Calculate Interview Slot1').item?.json || {}).candidate_email) || (($('Calculate Interview Slot1').item?.json || {}).email) || '').toLowerCase()),\n  candidate_name:  (() => { const current = $('Calculate Interview Slot1').item?.json || {}; const name = String(current.candidate_name || current.name || current.full_name || '').trim(); if (name && name.toLowerCase() !== 'candidate') return name; const localPart = String(current.candidate_email || current.email || '').split('@')[0]; return localPart ? localPart.replace(/[._-]+/g, ' ').replace(/\\s+/g, ' ').trim().replace(/\\b\\w/g, (c) => c.toUpperCase()) : 'Candidate'; })(),\n  interviewer_email: ((((($('Calculate Interview Slot1').item?.json || {}).interviewerEmail) || 'workspace3705@gmail.com').toLowerCase())),\n  interviewer_name:  ((($('Calculate Interview Slot1').item?.json || {}).interviewerName) || 'HR Team'),\n  round_number:    (($('Calculate Interview Slot1').item?.json || {}).round_number || 1),\n  round_label:     (($('Calculate Interview Slot1').item?.json || {}).round_label || 'HR Round'),\n  interview_format:(($('Calculate Interview Slot1').item?.json || {}).interview_format || 'video call'),\n  job_id:          (($('Calculate Interview Slot1').item?.json || {}).job_id || ''),\n  job_title:       (($('Calculate Interview Slot1').item?.json || {}).job_title || ($('Calculate Interview Slot1').item?.json || {}).position || ($('Calculate Interview Slot1').item?.json || {}).role || ''),\n  role:            (($('Calculate Interview Slot1').item?.json || {}).role || ($('Calculate Interview Slot1').item?.json || {}).job_title || ($('Calculate Interview Slot1').item?.json || {}).position || ''),\n  scheduled_time:  ((($('Calculate Interview Slot1').item?.json || {}).audit_start) || ($('Create Google Calendar Event1').item?.json?.start?.dateTime || $('Create Google Calendar Event1').first().json.start?.dateTime || null)),\n  timezone: 'Asia/Kolkata',\n  meeting_link:    (($('Create Google Calendar Event1').item?.json?.hangoutLink || $('Create Google Calendar Event1').item?.json?.conferenceData?.entryPoints?.find(e => e.entryPointType === 'video')?.uri || $('Create Google Calendar Event1').item?.json?.conferenceData?.entryPoints?.[0]?.uri || $('Create Google Calendar Event1').first().json.hangoutLink || $('Create Google Calendar Event1').first().json.conferenceData?.entryPoints?.find(e => e.entryPointType === 'video')?.uri || $('Create Google Calendar Event1').first().json.conferenceData?.entryPoints?.[0]?.uri || null)),\n  feedback_form_url: ((($('Calculate Interview Slot1').item?.json || {}).public_app_base_url || (($('Calculate Interview Slot1').item?.json || {}).app_base_url) || (($('Calculate Interview Slot1').item?.json || {}).feedback_base_url) || 'http://127.0.0.1:8000').replace(/\\\/$/, '') + '/feedback-form.html')\n}) }}",
+        "options": {}
+      },
+      "id": "35da801d-6628-4338-a1e4-66e92b148666",
+      "name": "Generate Invite Email1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -19504,
+        68096
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.brevo.com/v3/smtp/email",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api-key",
+              "value": "={{ $env.BREVO_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  sender: { name: 'HR Team', email: 'workspace3705@gmail.com' },\n  to: [{ email: ($('Generate Invite Email1').first().json.recipient_email || $('Calculate Interview Slot1').item.json.candidate_email), name: ($('Generate Invite Email1').first().json.recipient_name || $('Calculate Interview Slot1').item.json.candidate_name || 'Candidate') }],\n  subject: ($('Generate Invite Email1').first().json.subject),\n  htmlContent: ($('Generate Invite Email1').first().json.body)\n}) }}",
+        "options": {}
+      },
+      "id": "e0d6b20e-7303-436d-8a1f-48705e0dc357",
+      "name": "Send Brevo Email1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -19280,
+        68096
+      ],
+      "retryOnFail": true,
+      "maxRetries": 3,
+      "waitBetweenRetries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE resume_data SET interview_status = 'INTERVIEW_INVITED' WHERE email = $1;",
+        "options": {
+          "queryReplacement": "={{ [((($('Calculate Interview Slot1').item?.json || {}).candidate_email) || (($('Calculate Interview Slot1').item?.json || {}).email) || '')] }}"
+        }
+      },
+      "id": "fcff4ce0-8e20-4940-b185-ab25eb00e56f",
+      "name": "Update Candidate Status1",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -19024,
+        68096
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "B3kNQnCoweGn6nNh",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO interview_schedules (candidate_name, candidate_email, job_id, role_title, interviewer_id, scheduled_time, google_event_id, status, round_number, round_label, meeting_link) SELECT $1, $2, $3, $4, $5, $6, $7, 'scheduled', $8, $9, $10 WHERE NOT EXISTS (SELECT 1 FROM interview_schedules s WHERE LOWER(TRIM(s.candidate_email)) = LOWER(TRIM($2)) AND COALESCE(NULLIF(TRIM(s.job_id), ''), NULLIF(TRIM(s.role_title), ''), 'default') = COALESCE(NULLIF(TRIM($3), ''), NULLIF(TRIM($4), ''), 'default') AND s.status IN ('scheduled', 'in_progress'));",
+        "options": {
+          "queryReplacement": "={{ [((($('Calculate Interview Slot1').item?.json || {}).candidate_name) || 'Candidate'), (((($('Calculate Interview Slot1').item?.json || {}).candidate_email) || (($('Calculate Interview Slot1').item?.json || {}).email) || '')), ((($('Calculate Interview Slot1').item?.json || {}).job_id) || ''), ((($('Calculate Interview Slot1').item?.json || {}).job_title) || (($('Calculate Interview Slot1').item?.json || {}).position) || (($('Calculate Interview Slot1').item?.json || {}).role) || ''), ((($('Calculate Interview Slot1').item?.json || {}).interviewerId) || 1), ((($('Calculate Interview Slot1').item?.json || {}).audit_start) || null), ($('Create Google Calendar Event1').item?.json?.id || $('Create Google Calendar Event1').first().json?.id || 'N/A'), ((($('Calculate Interview Slot1').item?.json || {}).round_number) || 1), ((($('Calculate Interview Slot1').item?.json || {}).round_label) || 'HR Round'), (($('Create Google Calendar Event1').item?.json?.hangoutLink || $('Create Google Calendar Event1').first().json?.hangoutLink || 'N/A'))] }}"
+        }
+      },
+      "id": "fd5eec5c-b2c0-479a-986b-622db89c3fa4",
+      "name": "Log Interview Schedule1",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -18784,
+        68096
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "B3kNQnCoweGn6nNh",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/notifications",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ type: 'success', title: 'Interview Scheduled', message: 'Interview scheduled for ' + $('Calculate Interview Slot1').item.json.candidate_name, target_role: 'recruiter' }) }}",
+        "options": {}
+      },
+      "id": "78362465-afdc-43a9-aba8-14d73f3d20e4",
+      "name": "Push Selection Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -18544,
+        68096
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "2d18ea01-c76f-478d-8a29-fbb57486d0b5",
+      "name": "Reminder Trigger1",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        -21728,
+        68752
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM interview_schedules WHERE status = 'scheduled' AND reminder_24h_sent = false AND scheduled_time BETWEEN NOW() + INTERVAL '23 hours 45 minutes' AND NOW() + INTERVAL '24 hours';",
+        "options": {}
+      },
+      "id": "99822859-5939-4d8d-8216-e204dca44cdd",
+      "name": "Fetch 24h Reminders1",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -21216,
+        68480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "B3kNQnCoweGn6nNh",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM interview_schedules WHERE status = 'scheduled' AND reminder_1h_sent = false AND scheduled_time BETWEEN NOW() + INTERVAL '45 minutes' AND NOW() + INTERVAL '1 hour';",
+        "options": {}
+      },
+      "id": "fe56671d-aa36-4f1c-b689-89eb86e16ddc",
+      "name": "Fetch 1h Reminders1",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -21216,
+        68848
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "B3kNQnCoweGn6nNh",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/email/interview-reminder",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ candidate_email: $json.candidate_email, candidate_name: $json.candidate_name, scheduled_time: $json.scheduled_time, round_label: $json.round_label, meeting_link: $json.meeting_link }) }}",
+        "options": {}
+      },
+      "id": "e8ef40be-509c-4b13-939c-ee648c396b60",
+      "name": "Generate Reminder Email1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -20704,
+        68784
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.skipped !== true }}"
+            }
+          ],
+          "string": [
+            {
+              "value1": "={{ $json.recipient_email }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "5da2ca3f-d482-4640-a196-2494229583b4",
+      "name": "Has Valid Reminder1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -20480,
+        68784
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.brevo.com/v3/smtp/email",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api-key",
+              "value": "={{ $env.BREVO_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  sender: { name: 'HR Team', email: 'workspace3705@gmail.com' },\n  to: [{ email: $json.recipient_email, name: $json.recipient_name }, { email: 'workspace3705@gmail.com', name: 'HR Manager' }],\n  subject: 'Reminder: Interview with ' + ($node['Fetch 24h Reminders1'].json.candidate_name || $node['Fetch 1h Reminders1'].json.candidate_name || $json.recipient_name),\n  htmlContent: $json.body + '<br><br><strong>Meeting Link:</strong> ' + ($node['Fetch 24h Reminders1'].json.meeting_link || $node['Fetch 1h Reminders1'].json.meeting_link || 'Check Calendar')\n}) }}",
+        "options": {}
+      },
+      "id": "33e69a5d-0d65-4647-a2af-8e3e869763ae",
+      "name": "Send Reminder Brevo1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -20224,
+        68768
+      ],
+      "retryOnFail": true,
+      "maxRetries": 3,
+      "waitBetweenRetries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE interview_schedules SET reminder_24h_sent = (CASE WHEN scheduled_time > NOW() + INTERVAL '12 hours' THEN true ELSE reminder_24h_sent END), reminder_1h_sent = (CASE WHEN scheduled_time <= NOW() + INTERVAL '12 hours' THEN true ELSE reminder_1h_sent END) WHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ [$json.id] }}"
+        }
+      },
+      "id": "9aa882fe-6a08-472d-911a-704474173f1e",
+      "name": "Mark Reminder Sent",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -19984,
+        68768
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "B3kNQnCoweGn6nNh",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/interview/send-feedback-kits",
+        "options": {}
+      },
+      "id": "e7aa966b-f3b2-4d5d-80ff-00a34368bf4e",
+      "name": "Send Post-Interview Kits1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -21216,
+        68672
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/interview/check-no-shows?grace_minutes=15",
+        "options": {}
+      },
+      "id": "54b074e0-a83a-4565-a132-16e42cdd8d8b",
+      "name": "No-Show Detection1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -21216,
+        69024
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT s.id AS interview_id, s.candidate_name, s.candidate_email, s.round_number FROM interview_schedules s WHERE s.feedback_submitted = TRUE AND s.status NOT LIKE 'decision_%' AND s.status != 'cancelled' ORDER BY s.scheduled_time DESC LIMIT 20;",
+        "options": {}
+      },
+      "id": "de6fd280-4bf4-4a0d-a164-24c0d91e526f",
+      "name": "Fetch Pending Decisions1",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -20928,
+        68496
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "B3kNQnCoweGn6nNh",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/interview/decision/{{ $json.interview_id }}",
+        "options": {}
+      },
+      "id": "c8a6e53d-9ea9-404a-8c4b-24af62965e73",
+      "name": "Trigger Decision1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -20688,
+        68496
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.decision || 'pass' }}",
+              "value2": "fail"
+            }
+          ]
+        }
+      },
+      "id": "77a0e7bf-cbd9-4796-9276-c74e2ae14770",
+      "name": "Route Decision1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -20448,
+        68496
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/email/rejection",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ candidate_email: ($json.candidate_email || $node['Fetch Pending Decisions1'].first().json.candidate_email || ''), candidate_name: ($json.candidate_name || $node['Fetch Pending Decisions1'].first().json.candidate_name || '') }) }}",
+        "options": {}
+      },
+      "id": "8dee935d-73e3-4d52-aff1-fe85d2603f89",
+      "name": "Generate Rejection Email1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -20192,
+        68400
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.brevo.com/v3/smtp/email",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api-key",
+              "value": "={{ $env.BREVO_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  sender: { name: 'HR Team', email: 'workspace3705@gmail.com' },\n  to: [{ email: $json.recipient_email, name: $json.recipient_name }],\n  subject: $json.subject,\n  htmlContent: $json.body\n}) }}",
+        "options": {}
+      },
+      "id": "ba057bf3-3c52-40ee-8278-cf892b18d044",
+      "name": "Send Rejection Brevo1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -19952,
+        68400
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/email/next-round",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ \n  candidate_email: ($json.candidate_email || $node['Fetch Pending Decisions1'].first().json.candidate_email || ''), \n  candidate_name: ($json.candidate_name || $node['Fetch Pending Decisions1'].first().json.candidate_name || ''), \n  next_round_number: 1, \n  next_round_label: 'HR Round' \n}) }}",
+        "options": {}
+      },
+      "id": "0f1a8cec-61e9-4140-b474-9466438bceee",
+      "name": "Generate Next Round Email1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -20192,
+        68592
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.brevo.com/v3/smtp/email",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api-key",
+              "value": "={{ $env.BREVO_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  sender: { name: 'HR Team', email: 'workspace3705@gmail.com' },\n  to: [{ email: $json.recipient_email, name: $json.recipient_name }],\n  subject: $json.subject,\n  htmlContent: $json.body\n}) }}",
+        "options": {}
+      },
+      "id": "5cf133a5-28b6-4324-bb36-9af361248be3",
+      "name": "Send Next Round Brevo1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -19952,
+        68592
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE resume_data SET interview_status = (CASE WHEN $2 = 2 THEN 'NEXT_ROUND' WHEN $2 = 3 THEN 'TECHNICAL_PASSED' ELSE 'HIRED' END) WHERE email = $1;",
+        "options": {
+          "queryReplacement": "={{ [$json.candidate_email || $json.candidate, ($json.next_round_number || 2)] }}"
+        }
+      },
+      "id": "a739a1a4-6429-4d02-bbea-a70420846794",
+      "name": "Update Candidate to Next Round1",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -19712,
+        68592
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "B3kNQnCoweGn6nNh",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Shortlisted Candidates1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Trigger1": {
+      "main": [
+        [
+          {
+            "node": "Extract Webhook Candidates1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Is Webhook Source?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Webhook Candidates1": {
+      "main": [
+        [
+          {
+            "node": "Split Candidates1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Shortlisted Candidates1": {
+      "main": [
+        [
+          {
+            "node": "Split Candidates1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Webhook Source?": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Candidates1": {
+      "main": [
+        [
+          {
+            "node": "Is Webhook Source?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Store Candidate1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Candidate1": {
+      "main": [
+        [
+          {
+            "node": "Check Interviewer Availability1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Interviewer Availability1": {
+      "main": [
+        [
+          {
+            "node": "Calculate Interview Slot1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Interview Slot1": {
+      "main": [
+        [
+          {
+            "node": "Is Valid Candidate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Valid Candidate?": {
+      "main": [
+        [
+          {
+            "node": "Create Google Calendar Event1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Split Candidates1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Google Calendar Event1": {
+      "main": [
+        [
+          {
+            "node": "Generate Invite Email1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Invite Email1": {
+      "main": [
+        [
+          {
+            "node": "Send Brevo Email1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Brevo Email1": {
+      "main": [
+        [
+          {
+            "node": "Update Candidate Status1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Candidate Status1": {
+      "main": [
+        [
+          {
+            "node": "Log Interview Schedule1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Interview Schedule1": {
+      "main": [
+        [
+          {
+            "node": "Push Selection Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Push Selection Alert": {
+      "main": [
+        [
+          {
+            "node": "Split Candidates1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reminder Trigger1": {
+      "main": [
+        [
+          {
+            "node": "Fetch 24h Reminders1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch 1h Reminders1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Post-Interview Kits1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "No-Show Detection1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch 24h Reminders1": {
+      "main": [
+        [
+          {
+            "node": "Generate Reminder Email1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch 1h Reminders1": {
+      "main": [
+        [
+          {
+            "node": "Generate Reminder Email1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Reminder Email1": {
+      "main": [
+        [
+          {
+            "node": "Has Valid Reminder1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Valid Reminder1": {
+      "main": [
+        [
+          {
+            "node": "Send Reminder Brevo1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Reminder Brevo1": {
+      "main": [
+        [
+          {
+            "node": "Mark Reminder Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Post-Interview Kits1": {
+      "main": [
+        [
+          {
+            "node": "Fetch Pending Decisions1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Pending Decisions1": {
+      "main": [
+        [
+          {
+            "node": "Trigger Decision1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger Decision1": {
+      "main": [
+        [
+          {
+            "node": "Route Decision1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Decision1": {
+      "main": [
+        [
+          {
+            "node": "Generate Rejection Email1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate Next Round Email1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Rejection Email1": {
+      "main": [
+        [
+          {
+            "node": "Send Rejection Brevo1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Next Round Email1": {
+      "main": [
+        [
+          {
+            "node": "Send Next Round Brevo1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Next Round Brevo1": {
+      "main": [
+        [
+          {
+            "node": "Update Candidate to Next Round1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "eb6e91ffa7e8a4cada550dae77f04bedae408686fb0fc396e9dc5044f13c0147"
+  }
+}

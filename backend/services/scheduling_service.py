@@ -1,5 +1,5 @@
 import os
-import toml
+from dotenv import load_dotenv
 import json
 import pytz
 from datetime import datetime, timedelta, timezone
@@ -12,10 +12,6 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import smtplib
 
-# ---------------------------------------------------------------------------
-# Panel templates: maps job role keywords → ordered list of interview rounds
-# Each round specifies the interviewer department/tag and format.
-# ---------------------------------------------------------------------------
 PANEL_TEMPLATES = {
     "default": [
         {"round": 1, "label": "HR Round",  "department": "HR",  "format": "video call"},
@@ -28,22 +24,38 @@ PANEL_TEMPLATES = {
     ],
 }
 
-
 class SchedulingService:
     def __init__(self):
         self.load_secrets()
         self.setup_google_calendar()
 
-    # ------------------------------------------------------------------
-    # Config helpers
-    # ------------------------------------------------------------------
-
     def load_secrets(self):
-        self.secrets = {}
-        for path in ("secrets.toml", "../secrets.toml"):
-            if os.path.exists(path):
-                self.secrets = toml.load(path)
-                break
+        """Load configuration from environment variables (.env file)."""
+        load_dotenv()
+        self.secrets = {
+            "email": {
+                "sender_email": os.getenv("EMAIL_SENDER_EMAIL", ""),
+                "sender_name": os.getenv("EMAIL_SENDER_NAME", "HR Recruitment Team"),
+                "sender_password": os.getenv("SMTP_SENDER_PASSWORD", ""),
+                "smtp_server": os.getenv("SMTP_SERVER", "smtp.gmail.com"),
+                "smtp_port": int(os.getenv("SMTP_PORT", "587")),
+                "brevo_api_key": os.getenv("BREVO_API_KEY", ""),
+                "Microsoft_Teams": {
+                    "meeting_link": os.getenv("MICROSOFT_TEAMS_MEETING_LINK", ""),
+                },
+                "Zoom_Meeting": {
+                    "meeting_link": os.getenv("ZOOM_MEETING_LINK", ""),
+                },
+            },
+            "zoom": {
+                "client_id": os.getenv("ZOOM_CLIENT_ID", ""),
+                "client_secret": os.getenv("ZOOM_CLIENT_SECRET", ""),
+                "account_id": os.getenv("ZOOM_ACCOUNT_ID", ""),
+            },
+            "app": {
+                "base_url": os.getenv("APP_BASE_URL", "http://localhost:8000"),
+            },
+        }
 
     def setup_google_calendar(self):
         self.service = None
@@ -58,10 +70,6 @@ class SchedulingService:
             except Exception as e:
                 print(f"Google Calendar init failed: {e}")
 
-    # ------------------------------------------------------------------
-    # Panel template resolution
-    # ------------------------------------------------------------------
-
     def get_panel_template(self, job_title: str = "") -> List[Dict]:
         """Return the panel template for the given job title."""
         title_lower = (job_title or "").lower()
@@ -69,10 +77,6 @@ class SchedulingService:
             if key != "default" and key in title_lower:
                 return PANEL_TEMPLATES[key]
         return PANEL_TEMPLATES["default"]
-
-    # ------------------------------------------------------------------
-    # Interviewer pool & load-balancing
-    # ------------------------------------------------------------------
 
     def get_interviewers(self) -> List[Dict]:
         conn = get_db_connection()
@@ -93,7 +97,7 @@ class SchedulingService:
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
-                # Count interviews per interviewer in the current week
+
                 query = """
                     SELECT i.id, i.name, i.email,
                            COALESCE(i.timezone, 'UTC') AS timezone,
@@ -119,10 +123,6 @@ class SchedulingService:
                 return None
         finally:
             conn.close()
-
-    # ------------------------------------------------------------------
-    # Slot generation
-    # ------------------------------------------------------------------
 
     def get_availability(self, interviewer_id: int, date_str: str) -> List[str]:
         """
@@ -161,7 +161,6 @@ class SchedulingService:
             result = self.service.freebusy().query(body=body).execute()
             busy_periods = result.get("calendars", {}).get(calendar_id, {}).get("busy", [])
 
-            # Build free slots (1-hour blocks) that don't overlap busy periods
             slots = []
             current = day_start
             while current + timedelta(hours=1) <= day_end:
@@ -221,7 +220,7 @@ class SchedulingService:
 
         now_utc = datetime.now(timezone.utc)
         window_days = max(1, int(search_window_days or 1))
-        offset_days = max(1, int(days_ahead or 1))  # Ensure at least 1 day ahead
+        offset_days = max(1, int(days_ahead or 1))                               
 
         collected: List[str] = []
         for day_index in range(offset_days, offset_days + window_days):
@@ -240,7 +239,7 @@ class SchedulingService:
                     slot_dt = self._normalize_slot_iso(slot)
                 except Exception:
                     continue
-                # Never propose past slots.
+
                 if slot_dt > now_utc:
                     collected.append(slot)
                     if len(collected) >= num_options:
@@ -249,7 +248,6 @@ class SchedulingService:
         if collected:
             return collected[:num_options]
 
-        # Fallback: generate future defaults in the same window.
         for day_index in range(offset_days, offset_days + window_days):
             search_date = (datetime.utcnow() + timedelta(days=day_index)).strftime("%Y-%m-%d")
             for slot in self._generate_default_slots(search_date, num_options):
@@ -262,10 +260,6 @@ class SchedulingService:
                     if len(collected) >= num_options:
                         return collected
         return collected[:num_options]
-
-    # ------------------------------------------------------------------
-    # Scheduling core
-    # ------------------------------------------------------------------
 
     def schedule_interview(
         self,
@@ -298,11 +292,9 @@ class SchedulingService:
             lock_key = f"interview_schedule:{normalized_email}"
 
             with conn.cursor() as cur:
-                # Serialize scheduling by candidate email, even when no row exists yet.
-                # This prevents duplicate inserts from concurrent webhook retries.
+
                 cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (lock_key,))
 
-                # Idempotency guard: keep one active interview and cancel legacy duplicates.
                 cur.execute(
                     """
                     SELECT id
@@ -361,7 +353,6 @@ class SchedulingService:
                 interviewer_row = cur.fetchone()
             conn.commit()
 
-            # Send scheduling details to interviewer only.
             if interviewer_row and interviewer_row[1]:
                 self.send_interviewer_kit(
                     interviewer_email=interviewer_row[1],
@@ -439,10 +430,6 @@ class SchedulingService:
         finally:
             conn.close()
 
-    # ------------------------------------------------------------------
-    # No-show handling
-    # ------------------------------------------------------------------
-
     def flag_no_show(self, interview_id: int) -> bool:
         """Mark an interview as no-show and send HR a notification."""
         conn = get_db_connection()
@@ -488,10 +475,6 @@ class SchedulingService:
                 ]
         finally:
             conn.close()
-
-    # ------------------------------------------------------------------
-    # Post-interview: feedback kit & aggregation
-    # ------------------------------------------------------------------
 
     def get_interviews_ready_for_feedback(self, window_minutes: int = 15) -> List[Dict]:
         """
@@ -561,7 +544,6 @@ class SchedulingService:
                 else:
                     decision = "hold"
 
-                # Persist decision on the interview record
                 cur.execute(
                     "UPDATE interview_schedules SET status = %s WHERE id = %s",
                     (f"decision_{decision}", interview_id),
@@ -573,10 +555,6 @@ class SchedulingService:
             raise e
         finally:
             conn.close()
-
-    # ------------------------------------------------------------------
-    # Email helpers
-    # ------------------------------------------------------------------
 
     def _format_slot_for_email(self, raw_slot: Optional[str], tz_name: Optional[str] = None) -> str:
         """Convert ISO/UTC schedule strings into readable local time for emails."""
@@ -661,7 +639,6 @@ class SchedulingService:
 
         formatted_confirmed_time = self._format_slot_for_email(slot_iso)
 
-        # Format slot options list
         slots_html = ""
         if slot_options:
             items = "".join(f"<li>{self._format_slot_for_email(s)}</li>" for s in slot_options)
@@ -890,4 +867,3 @@ class SchedulingService:
                 server.send_message(msg)
         except Exception as e:
             print(f"SMTP send failed: {e}")
-

@@ -19,9 +19,8 @@ export default function Login() {
 
   const roles = [
     { value: 'recruiter', label: 'Recruiter' },
-    { value: 'interviewer', label: 'Interviewer' },
-    { value: 'candidate', label: 'Candidate' },
-    { value: 'super_admin', label: 'Admin' }
+    { value: 'student', label: 'Student' },
+    { value: 'hr', label: 'HR' }
   ]
 
   const [formData, setFormData] = useState({
@@ -64,10 +63,9 @@ export default function Login() {
       setSuccess(socialMode === 'login' ? 'Google login successful!' : 'Google signup successful!')
       const role = data?.user?.role || (auth.user && auth.user.role)
       const rolePaths = {
-        recruiter: '/recruiter',
-        interviewer: '/interviewer',
-        candidate: '/candidate',
-        super_admin: '/admin'
+        recruiter: '/dashboard/recruiter',
+        student: '/dashboard/student',
+        hr: '/dashboard/admin'
       }
       const target = rolePaths[role] || '/dashboard'
       window.location.href = target
@@ -132,10 +130,9 @@ export default function Login() {
       setSuccess('Login successful!')
       const role = data?.user?.role || (auth.user && auth.user.role)
       const rolePaths = {
-        recruiter: '/recruiter',
-        interviewer: '/interviewer',
-        candidate: '/candidate',
-        super_admin: '/admin'
+        recruiter: '/dashboard/recruiter',
+        student: '/dashboard/student',
+        hr: '/dashboard/admin'
       }
       const target = rolePaths[role] || '/dashboard'
       window.location.href = target
@@ -159,10 +156,9 @@ export default function Login() {
       setSuccess('Registration successful!')
       const role = data?.user?.role || formData.role
       const rolePaths = {
-        recruiter: '/recruiter',
-        interviewer: '/interviewer',
-        candidate: '/candidate',
-        super_admin: '/admin'
+        recruiter: '/dashboard/recruiter',
+        student: '/dashboard/student',
+        hr: '/dashboard/admin'
       }
       const target = rolePaths[role] || '/dashboard'
       window.location.href = target

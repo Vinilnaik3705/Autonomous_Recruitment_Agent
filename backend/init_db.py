@@ -2,7 +2,6 @@ import os
 from pathlib import Path
 from backend.database import get_db_connection
 
-
 def _run_sql_migrations(cur):
     """Apply SQL files in backend/migrations once, tracked in schema_migrations."""
     migrations_dir = Path(__file__).resolve().parent / "migrations"
@@ -38,12 +37,11 @@ def _run_sql_migrations(cur):
             )
             print(f"Applied migration: {migration_name}")
         except Exception as migration_error:
-            # Keep startup resilient on long-lived instances with partially diverged schemas.
+
             cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
             print(f"Skipping migration {migration_name}: {migration_error}")
         finally:
             cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
-
 
 def _apply_schema_hotfixes(cur):
     """Patch legacy schemas used by existing n8n workflows without destructive changes."""
@@ -59,7 +57,31 @@ def _apply_schema_hotfixes(cur):
             ADD COLUMN IF NOT EXISTS oa_report_url TEXT,
             ADD COLUMN IF NOT EXISTS oa_completed_at TIMESTAMP,
             ADD COLUMN IF NOT EXISTS final_decision VARCHAR(50),
-            ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            ADD COLUMN IF NOT EXISTS organization_id VARCHAR(100)
+        """
+    )
+
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS organization_id VARCHAR(100)")
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT")
+    cur.execute("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS user_id INTEGER")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id)"
+    )
+    cur.execute("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS organization_id VARCHAR(100)")
+    cur.execute("ALTER TABLE job_descriptions ADD COLUMN IF NOT EXISTS organization_id VARCHAR(100)")
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER,
+            action VARCHAR(255) NOT NULL,
+            entity_type VARCHAR(100),
+            entity_id VARCHAR(100),
+            ip_address VARCHAR(45),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
         """
     )
 
@@ -87,7 +109,6 @@ def _apply_schema_hotfixes(cur):
         """
     )
 
-    # n8n uses ON CONFLICT(candidate_email, scheduled_time); ensure matching unique constraint exists.
     cur.execute(
         """
         DO $$
@@ -105,8 +126,6 @@ def _apply_schema_hotfixes(cur):
         """
     )
 
-    # Enforce one active interview per candidate email.
-    # 1) Cancel legacy duplicates while keeping the earliest active record.
     cur.execute(
         """
         WITH ranked AS (
@@ -129,7 +148,6 @@ def _apply_schema_hotfixes(cur):
         """
     )
 
-    # 2) Add a unique partial index so DB rejects any second active row.
     cur.execute(
         """
         DO $$
@@ -164,7 +182,7 @@ def init_db():
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            # Users
+
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
@@ -177,7 +195,6 @@ def init_db():
                 )
             """)
 
-            # Job Descriptions (session isolation - each screening session gets a unique job_id)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS job_descriptions (
                     job_id VARCHAR(50) PRIMARY KEY,
@@ -189,8 +206,7 @@ def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            
-            # Interviewers
+
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS interviewers (
                     id SERIAL PRIMARY KEY,
@@ -205,7 +221,6 @@ def init_db():
                 )
             """)
 
-            # Resume Files (file upload tracking)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS resume_files (
                     id SERIAL PRIMARY KEY,
@@ -219,8 +234,6 @@ def init_db():
                 )
             """)
 
-            # Resume Data (parsed resume content)
-            # job_id ties each resume to a specific screening session
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS resume_data (
                     id SERIAL PRIMARY KEY,
@@ -239,7 +252,6 @@ def init_db():
                 )
             """)
 
-            # Candidates (workflow tracking - OA, reminders, shortlisting)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS candidates (
                     id SERIAL PRIMARY KEY,
@@ -261,7 +273,6 @@ def init_db():
                 )
             """)
 
-            # Interview Schedules
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS interview_schedules (
                     id SERIAL PRIMARY KEY,
@@ -286,8 +297,6 @@ def init_db():
                 )
             """)
 
-            # Backward compatibility for existing databases that were created
-            # before reminder and round tracking columns were added.
             cur.execute("""
                 ALTER TABLE interview_schedules
                     ADD COLUMN IF NOT EXISTS round_number INTEGER DEFAULT 1,
@@ -309,14 +318,12 @@ def init_db():
                 SET reminder_1h_sent = FALSE
                 WHERE reminder_1h_sent IS NULL
             """)
-            
-            # Create index for faster duplicate checking
+
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_interview_schedules_email_status 
                 ON interview_schedules(candidate_email, status)
             """)
 
-            # Interview Feedback
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS interview_feedback (
                     id SERIAL PRIMARY KEY,
@@ -337,7 +344,6 @@ def init_db():
                 )
             """)
 
-            # Onboarding Tasks
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS onboarding_tasks (
                     id SERIAL PRIMARY KEY,
@@ -348,14 +354,12 @@ def init_db():
                 )
             """)
 
-            # Insert default interviewer if none exists
             cur.execute("""
                 INSERT INTO interviewers (id, name, email, timezone, is_active)
                 VALUES (1, 'HR Team', 'workspace3705@gmail.com', 'Asia/Kolkata', TRUE)
                 ON CONFLICT (email) DO NOTHING
             """)
 
-            # Insert demo users only when explicitly enabled.
             enable_demo_users = os.getenv('ENABLE_DEMO_USERS', 'false').lower() in ('1', 'true', 'yes', 'on')
             if enable_demo_users:
                 from hashlib import sha256
@@ -364,9 +368,8 @@ def init_db():
                     return sha256(pwd.encode()).hexdigest()
 
                 demo_users = [
-                    ('admin', 'admin@example.com', hash_pwd('password'), 'super_admin'),
+                    ('admin', 'admin@example.com', hash_pwd('password'), 'hr'),
                     ('recruiter', 'recruiter@example.com', hash_pwd('password'), 'recruiter'),
-                    ('interviewer', 'interviewer@example.com', hash_pwd('password'), 'interviewer'),
                     ('john.smith', 'john.smith@company.com', hash_pwd('password'), 'recruiter'),
                 ]
 
@@ -380,13 +383,12 @@ def init_db():
                         (username, email, pwd_hash, role)
                     )
 
-            # Apply migration scripts and hotfixes on every startup in a safe/idempotent way.
             _run_sql_migrations(cur)
             _apply_schema_hotfixes(cur)
 
             print("Database initialized successfully with unified schema!")
             if enable_demo_users:
-                print("✓ Demo users created for testing (admin@example.com, recruiter@example.com, interviewer@example.com)")
+                print("✓ Demo users created for testing (admin@example.com, recruiter@example.com, john.smith@company.com)")
             conn.commit()
     except Exception as e:
         print(f"Error initializing database: {e}")

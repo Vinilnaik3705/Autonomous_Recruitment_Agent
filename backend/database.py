@@ -1,37 +1,23 @@
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
-import toml
+from dotenv import load_dotenv
 from typing import Generator, Optional
 
+load_dotenv()
+
 def get_db_config():
-    """Load database config from environment variables (priority) or secrets.toml."""
-    # 1. DATABASE_URL (Docker / Production priority)
+    """Load database config from environment variables (.env file)."""
+
     if os.getenv("DATABASE_URL"):
         return {"dsn": os.getenv("DATABASE_URL")}
 
-    config = {}
-    # 2. Load secrets.toml if available (Local Dev)
-    if os.path.exists("secrets.toml"):
-        try:
-            secrets = toml.load("secrets.toml")
-            config = secrets.get('database', {})
-        except Exception as e:
-            print(f"Warning: Could not load secrets.toml: {e}")
-    elif os.path.exists("../secrets.toml"):
-        try:
-            secrets = toml.load("../secrets.toml")
-            config = secrets.get('database', {})
-        except Exception as e:
-            print(f"Warning: Could not load ../secrets.toml: {e}")
-    
-    # 3. Return Dictionary (Env vars override config file if needed, or fallback)
     return {
-        'host': os.getenv('DB_HOST', config.get('host', 'localhost')),
-        'database': os.getenv('DB_NAME', config.get('name', 'hr_db')),
-        'user': os.getenv('DB_USER', config.get('user', 'hr_user')),
-        'password': os.getenv('DB_PASSWORD', config.get('password', 'hr_pass')),
-        'port': os.getenv('DB_PORT', config.get('port', 5433))
+        'host': os.getenv('DB_HOST', 'localhost'),
+        'database': os.getenv('DB_NAME', 'hr_db'),
+        'user': os.getenv('DB_USER', 'hr_user'),
+        'password': os.getenv('DB_PASSWORD', 'hr_pass'),
+        'port': os.getenv('DB_PORT', 5433)
     }
 
 def get_db_connection():
@@ -72,7 +58,7 @@ def get_db_connection():
                     combined_fallback["port"] = 5432
                     attempts.append(("host+port fallback", combined_fallback))
             elif port == "5432":
-                # In this project, Docker Postgres is commonly published as 5433 on host.
+
                 port_fallback_config = dict(config)
                 port_fallback_config["port"] = 5433
                 attempts.append(("port fallback 5432->5433", port_fallback_config))
@@ -110,3 +96,57 @@ def close_db(db):
     """Close database connection."""
     if db:
         db.close()
+
+import redis
+
+_redis_client = None
+
+def get_redis_client():
+    """Retrieve or initialize a Redis client. Returns None if connection fails (resilient fallback)."""
+    global _redis_client
+    if _redis_client is not None:
+        return _redis_client
+
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    try:
+
+        client = redis.from_url(redis_url, socket_connect_timeout=2.0, socket_timeout=2.0)
+        client.ping()
+        _redis_client = client
+        print(f"--> REDIS CONNECT: Success ({redis_url})")
+        return _redis_client
+    except Exception as e:
+        print(f"--> REDIS CONNECT: Failed ({redis_url}): {e}. Caching is disabled.")
+        return None
+
+import json
+
+def cache_get(key: str):
+    """Get JSON-deserialized value from Redis."""
+    client = get_redis_client()
+    if client:
+        try:
+            val = client.get(key)
+            if val:
+                return json.loads(val)
+        except Exception as e:
+            print(f"--> REDIS CACHE GET ERROR: {e}")
+    return None
+
+def cache_set(key: str, value, ttl: int = 10):
+    """Set JSON-serialized value in Redis with a TTL (seconds)."""
+    client = get_redis_client()
+    if client:
+        try:
+            client.setex(key, ttl, json.dumps(value, default=str))
+        except Exception as e:
+            print(f"--> REDIS CACHE SET ERROR: {e}")
+
+def cache_delete(key: str):
+    """Delete a key from Redis cache."""
+    client = get_redis_client()
+    if client:
+        try:
+            client.delete(key)
+        except Exception as e:
+            print(f"--> REDIS CACHE DELETE ERROR: {e}")

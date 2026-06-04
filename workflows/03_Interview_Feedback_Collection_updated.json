@@ -1,0 +1,731 @@
+{
+  "name": "03 Interview Feedback Collection",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "feedback-collection",
+        "options": {}
+      },
+      "id": "e5420240-fde9-4cd4-a0bc-1a02eb47fd31",
+      "name": "Webhook: Receive Feedback",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -2064,
+        3568
+      ],
+      "webhookId": "fa69a06b-c4c8-4b23-9fc4-b518bf4237b9",
+      "notes": "Receives feedback submissions from backend /interview/feedback/collect"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH target AS ( SELECT ctid FROM interview_feedback WHERE interview_id = $1 ORDER BY submitted_at DESC NULLS LAST LIMIT 1 ), updated AS ( UPDATE interview_feedback f SET technical_score = $2, communication_score = $3, cultural_fit_score = $4, overall_rating = $5, recommendation = $6, comments = $7, submitted_at = NOW() FROM target t WHERE f.ctid = t.ctid RETURNING f.* ) INSERT INTO interview_feedback (interview_id, technical_score, communication_score, cultural_fit_score, overall_rating, recommendation, comments, submitted_at) SELECT $1, $2, $3, $4, $5, $6, $7, NOW() WHERE NOT EXISTS (SELECT 1 FROM target) RETURNING *;",
+        "options": {
+          "queryReplacement": "={{ [$json.body.interview_id, $json.body.technical_score, $json.body.communication_score, $json.body.cultural_fit_score, $json.body.overall_rating, $json.body.recommendation, $json.body.comments] }}"
+        }
+      },
+              "value": "={{ $env.BREVO_API_KEY }}"
+      "name": "Save Feedback to DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -1856,
+        3568
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "B3kNQnCoweGn6nNh",
+          "name": "Postgres account"
+        }
+      }
+              "value": "={{ $env.BREVO_API_KEY }}"
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT i.id, i.candidate_email, i.candidate_name, i.round_label, i.round_number, i.job_title FROM interview_schedules i WHERE i.id = $1 LIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [($json.interview_id || $('Webhook: Receive Feedback').first().json.body.interview_id)] }}"
+        }
+      },
+      "id": "c933d042-a5ec-4923-9987-d45cb89c1a48",
+      "name": "Fetch Interview Details",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -1632,
+        3568
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "B3kNQnCoweGn6nNh",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const interview = $json || {};\nconst feedback = $('Save Feedback to DB').first().json || {};\nconst webhookBody = $('Webhook: Receive Feedback').first().json.body || {};\n\nconst raw = String((feedback.recommendation ?? webhookBody.recommendation ?? '')).trim().toLowerCase();\nlet decision = 'ON_HOLD';\nif (['accept', 'strong_yes', 'yes', 'hire', 'selected'].includes(raw)) decision = 'ACCEPT';\nelse if (['reject', 'strong_no', 'no', 'decline', 'rejected'].includes(raw)) decision = 'REJECT';\n\nreturn [{\n  json: {\n    decision,\n    interview_id: interview.id ?? feedback.interview_id ?? webhookBody.interview_id ?? null,\n    candidate_email: interview.candidate_email ?? webhookBody.candidate_email ?? '',\n    candidate_name: interview.candidate_name ?? webhookBody.candidate_name ?? 'Candidate',\n    round_label: interview.round_label ?? webhookBody.round_label ?? 'Interview',\n    round_number: interview.round_number ?? 1,\n    job_title: interview.job_title ?? webhookBody.job_title ?? webhookBody.position ?? webhookBody.role ?? '',\n    technical_score: feedback.technical_score ?? webhookBody.technical_score ?? null,\n    communication_score: feedback.communication_score ?? webhookBody.communication_score ?? null,\n    cultural_fit_score: feedback.cultural_fit_score ?? webhookBody.cultural_fit_score ?? null,\n    overall_rating: feedback.overall_rating ?? webhookBody.overall_rating ?? null,\n    recommendation: feedback.recommendation ?? webhookBody.recommendation ?? '',\n    comments: feedback.comments ?? webhookBody.comments ?? ''\n  }\n}];"
+      },
+      "id": "553610ef-348d-4420-b0af-4376c8b58403",
+      "name": "Prepare Decision Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1408,
+        3568
+      ],
+      "notes": "Normalizes recommendation to ACCEPT / REJECT / ON_HOLD"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.decision }}",
+                    "rightValue": "ACCEPT",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "ACCEPT"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.decision }}",
+                    "rightValue": "REJECT",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "REJECT"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.decision }}",
+                    "rightValue": "ON_HOLD",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "ON_HOLD"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "73d094ec-4e9d-4713-a61e-d31a9e066ee3",
+      "name": "Decision Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        -1184,
+        3568
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE interview_schedules SET status = 'feedback_accepted', feedback_submitted = TRUE WHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ [$json.interview_id] }}"
+        }
+      },
+      "id": "2b3181f3-bf4d-4d82-b45f-a64d04fa6f02",
+      "name": "Mark as Accepted",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -960,
+        3456
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "B3kNQnCoweGn6nNh",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE resume_data SET interview_status = 'SELECTED', updated_at = NOW() WHERE email = $1;",
+        "options": {
+          "queryReplacement": "={{ [$('Prepare Decision Payload').first().json.candidate_email] }}"
+        }
+      },
+      "id": "bc01e877-074c-4ca9-a884-65611e790c88",
+      "name": "Update Candidate to SELECTED",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -736,
+        3456
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "B3kNQnCoweGn6nNh",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.brevo.com/v3/smtp/email",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api-key",
+              "value": "={{ $env.BREVO_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ sender: { name: 'HR Recruiting Team', email: 'workspace3705@gmail.com' }, to: [{ email: $('Prepare Decision Payload').first().json.candidate_email, name: $('Prepare Decision Payload').first().json.candidate_name }], subject: 'Job Offer from HR Recruiting Team - ' + ($('Prepare Decision Payload').first().json.job_title || $('Prepare Decision Payload').first().json.position || $('Prepare Decision Payload').first().json.role || 'Selected Role'), htmlContent: '<div style=\"font-family: Arial, Helvetica, sans-serif; max-width: 720px; margin: 0 auto; color: #1f2937; line-height: 1.7;\"><h2 style=\"margin: 0 0 18px; font-size: 26px; color: #111827;\">Offer Letter</h2><p><strong>Subject Line:</strong> Job Offer from HR Recruiting Team</p><p>Dear ' + ($('Prepare Decision Payload').first().json.candidate_name || 'Candidate') + ',</p><p>We are pleased to offer you the position of <strong>' + ($('Prepare Decision Payload').first().json.job_title || $('Prepare Decision Payload').first().json.position || $('Prepare Decision Payload').first().json.role || 'Selected Role') + '</strong> at our organization. Your interview performance and skills are a strong match for our recruitment goals and team culture.</p><p>The detailed offer letter with compensation, benefits, and onboarding information will be shared in the next communication. Kindly review and sign the offer document by the mentioned deadline to confirm your acceptance.</p><p>If you have any questions, feel free to reply to this email.</p><p>We look forward to welcoming you to the team and are confident you will make a valuable contribution.</p><p style=\"margin-top: 24px;\">Best regards,<br><strong>HR Recruiting Team</strong></p></div>' }) }}",
+        "options": {}
+      },
+      "id": "e7144501-0a7e-4254-91b4-8ac2624da86b",
+      "name": "Send Offer Letter Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -512,
+        3456
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C0AFTN7DT0X",
+          "mode": "list",
+          "cachedResultName": "recruitment"
+        },
+        "text": "=ACCEPTED\n\nCandidate: {{ $('Prepare Decision Payload').first().json.candidate_name }}\nRound: {{ $('Prepare Decision Payload').first().json.round_label || 'HR Round' }}\nEmail: {{ $('Prepare Decision Payload').first().json.candidate_email }}\nOverall Rating: {{ $('Prepare Decision Payload').first().json.overall_rating }}/5\n\nOffer letter sent to candidate.",
+        "otherOptions": {}
+      },
+      "id": "c2039f39-f0c9-4a15-92ae-e5a307649785",
+      "name": "Notify Slack - Accepted",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [
+        -288,
+        3456
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "hBxy0mheJhMITaUG",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/notifications",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ type: 'success', title: 'Candidate Accepted', message: 'Candidate ' + $('Prepare Decision Payload').first().json.candidate_name + ' has been selected and an offer letter has been sent.', target_role: 'hr' }) }}",
+        "options": {}
+      },
+      "id": "d581321a-c8e7-45e9-adf5-3e8c321cbfd6",
+      "name": "Push Accepted Notif",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -64,
+        3456
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($vars.N8N_BASE_URL || 'http://n8n:5678') + '/webhook/onboarding-start' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ candidate_email: $('Prepare Decision Payload').first().json.candidate_email, candidate_name: $('Prepare Decision Payload').first().json.candidate_name, round_label: $('Prepare Decision Payload').first().json.round_label, interview_id: $('Prepare Decision Payload').first().json.interview_id, source_workflow: '03_Interview_Feedback_Collection' }) }}",
+        "options": {}
+      },
+      "id": "e3b086e6-7b62-4ca8-a767-cf3672a628f8",
+      "name": "Trigger Onboarding Workflow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        160,
+        3456
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Starts onboarding workflow immediately after ACCEPT path updates status to SELECTED."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE interview_schedules SET status = 'feedback_rejected', feedback_submitted = TRUE WHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ [$json.interview_id] }}"
+        }
+      },
+      "id": "1d2ed8e6-170e-4bdc-b180-a7473443b626",
+      "name": "Mark as Rejected",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -960,
+        3648
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "B3kNQnCoweGn6nNh",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE resume_data SET interview_status = 'REJECTED', updated_at = NOW() WHERE email = $1;",
+        "options": {
+          "queryReplacement": "={{ [$('Prepare Decision Payload').first().json.candidate_email] }}"
+        }
+      },
+      "id": "88f805a1-5a9e-40a8-8045-2e2b15929aaf",
+      "name": "Update Candidate to REJECTED",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -736,
+        3648
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "B3kNQnCoweGn6nNh",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.brevo.com/v3/smtp/email",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api-key",
+              "value": "={{ $env.BREVO_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ sender: { name: 'HR Recruiting Team', email: 'workspace3705@gmail.com' }, to: [{ email: $('Prepare Decision Payload').first().json.candidate_email, name: $('Prepare Decision Payload').first().json.candidate_name }], subject: 'Application Status Update - ' + $('Prepare Decision Payload').first().json.round_label, htmlContent: '<div style=\"font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;\"><h2>Application Status Update</h2><p>Dear ' + $('Prepare Decision Payload').first().json.candidate_name + ',</p><p>Thank you for interviewing for <strong>' + $('Prepare Decision Payload').first().json.round_label + '</strong>. After careful review, we are moving forward with other candidates at this time.</p><p>Best regards,<br><strong>HR Recruiting Team</strong></p></div>' }) }}",
+        "options": {}
+      },
+      "id": "340cb3c7-19fe-4e87-b1e7-792ea1060b1f",
+      "name": "Send Rejection Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -512,
+        3648
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C0AFTN7DT0X",
+          "mode": "list",
+          "cachedResultName": "recruitment"
+        },
+        "text": "=REJECTED\n\nCandidate: {{ $('Prepare Decision Payload').first().json.candidate_name }}\nRound: {{ $('Prepare Decision Payload').first().json.round_label }}\nEmail: {{ $('Prepare Decision Payload').first().json.candidate_email }}\nOverall Rating: {{ $('Prepare Decision Payload').first().json.overall_rating }}/5\n\nRejection email sent to candidate.",
+        "otherOptions": {}
+      },
+      "id": "2e8ad4e4-958d-47ab-93c5-fff3c8987349",
+      "name": "Notify Slack - Rejected",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [
+        -288,
+        3648
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "hBxy0mheJhMITaUG",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/notifications",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ type: 'alert', title: 'Candidate Rejected', message: 'Candidate ' + $('Prepare Decision Payload').first().json.candidate_name + ' has been rejected after interview review.', target_role: 'hr' }) }}",
+        "options": {}
+      },
+      "id": "7d8ad06f-a44d-4843-ab05-18b89f503cb3",
+      "name": "Push Rejected Notif",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -64,
+        3648
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE interview_schedules SET status = 'feedback_on_hold', feedback_submitted = TRUE WHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ [$json.interview_id] }}"
+        }
+      },
+      "id": "9220f9e5-7dd7-4c89-965d-a3ee2728de9b",
+      "name": "Mark as On Hold",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -960,
+        3856
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "B3kNQnCoweGn6nNh",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE resume_data SET interview_status = 'ON_HOLD', updated_at = NOW() WHERE email = $1;",
+        "options": {
+          "queryReplacement": "={{ [$('Prepare Decision Payload').first().json.candidate_email] }}"
+        }
+      },
+      "id": "2845d87a-451e-41ed-9ff8-5df5e0b5c191",
+      "name": "Update Candidate to ON HOLD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -736,
+        3856
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "B3kNQnCoweGn6nNh",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C0AFTN7DT0X",
+          "mode": "list",
+          "cachedResultName": "recruitment"
+        },
+        "text": "=ON HOLD\n\nCandidate: {{ $('Prepare Decision Payload').first().json.candidate_name }}\nRound: {{ $('Prepare Decision Payload').first().json.round_label }}\nEmail: {{ $('Prepare Decision Payload').first().json.candidate_email }}\nOverall Rating: {{ $('Prepare Decision Payload').first().json.overall_rating }}/5\nComments: {{ $('Prepare Decision Payload').first().json.comments }}\n\nAction required: HR review and next-step decision.",
+        "otherOptions": {}
+      },
+      "id": "32d00778-a563-411f-a91d-202d5ada36ab",
+      "name": "Notify Slack - On Hold",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [
+        -512,
+        3856
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "hBxy0mheJhMITaUG",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/notifications",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ type: 'info', title: 'Candidate On Hold', message: 'Candidate ' + $('Prepare Decision Payload').first().json.candidate_name + ' has been placed on hold for further review.', target_role: 'hr' }) }}",
+        "options": {}
+      },
+      "id": "517843fa-626a-4e25-b598-23670b7cb635",
+      "name": "Push OnHold Notif",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -288,
+        3856
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook: Receive Feedback": {
+      "main": [
+        [
+          {
+            "node": "Save Feedback to DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Feedback to DB": {
+      "main": [
+        [
+          {
+            "node": "Fetch Interview Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Interview Details": {
+      "main": [
+        [
+          {
+            "node": "Prepare Decision Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Decision Payload": {
+      "main": [
+        [
+          {
+            "node": "Decision Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decision Router": {
+      "main": [
+        [
+          {
+            "node": "Mark as Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark as Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark as On Hold",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark as Accepted": {
+      "main": [
+        [
+          {
+            "node": "Update Candidate to SELECTED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Candidate to SELECTED": {
+      "main": [
+        [
+          {
+            "node": "Send Offer Letter Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Offer Letter Email": {
+      "main": [
+        [
+          {
+            "node": "Notify Slack - Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Slack - Accepted": {
+      "main": [
+        [
+          {
+            "node": "Push Accepted Notif",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Push Accepted Notif": {
+      "main": [
+        [
+          {
+            "node": "Trigger Onboarding Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark as Rejected": {
+      "main": [
+        [
+          {
+            "node": "Update Candidate to REJECTED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Candidate to REJECTED": {
+      "main": [
+        [
+          {
+            "node": "Send Rejection Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Rejection Email": {
+      "main": [
+        [
+          {
+            "node": "Notify Slack - Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Slack - Rejected": {
+      "main": [
+        [
+          {
+            "node": "Push Rejected Notif",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark as On Hold": {
+      "main": [
+        [
+          {
+            "node": "Update Candidate to ON HOLD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Candidate to ON HOLD": {
+      "main": [
+        [
+          {
+            "node": "Notify Slack - On Hold",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Slack - On Hold": {
+      "main": [
+        [
+          {
+            "node": "Push OnHold Notif",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "eb6e91ffa7e8a4cada550dae77f04bedae408686fb0fc396e9dc5044f13c0147"
+  }
+}

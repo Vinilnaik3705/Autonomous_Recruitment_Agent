@@ -4,7 +4,7 @@ from datetime import datetime
 
 class OnboardingService:
     def generate_offer_letter(self, candidate_name: str, role: str, start_date: str, salary: str):
-        # In a real app, this would use a template engine like Jinja2 or python-docx
+
         return f"""
         Offer Letter
 
@@ -21,22 +21,21 @@ class OnboardingService:
         Best regards,
         HR Recruiting Team
         """
-        
+
     def initiate_onboarding(self, candidate_email: str, offer_details: Dict):
         conn = get_db_connection()
         try:
             from psycopg2.extras import RealDictCursor
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Search by email in unified schema
+
                 cur.execute("SELECT candidate_name FROM resume_data WHERE email = %s LIMIT 1", (candidate_email,))
                 res = cur.fetchone()
                 if not res:
                     return False
-                
+
                 name = res['candidate_name']
                 letter = self.generate_offer_letter(name, offer_details['role'], offer_details['start_date'], offer_details['salary'])
-                
-                # Save to onboarding_tasks
+
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS onboarding_tasks (
                         id SERIAL PRIMARY KEY,
@@ -46,12 +45,12 @@ class OnboardingService:
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
-                
+
                 cur.execute("""
                     INSERT INTO onboarding_tasks (candidate_email, status, offer_letter_text)
                     VALUES (%s, 'offer_sent', %s)
                 """, (candidate_email, letter))
-                
+
             conn.commit()
             return True
         except Exception as e:

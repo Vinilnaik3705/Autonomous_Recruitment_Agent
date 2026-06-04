@@ -1,0 +1,878 @@
+{
+  "name": "01_Resume_Screening_Atomic",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "resume-upload-atomic",
+        "options": {}
+      },
+      "id": "4cbd486a-9287-47b0-9653-1c0d88b08fab",
+      "name": "Webhook - Upload Resume1",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        -5152,
+        8128
+      ],
+      "webhookId": "resume-upload-atomic"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "options": {}
+      },
+      "id": "fb449c1e-af34-4595-8883-c5c6597a4fd8",
+      "name": "Extract PDF Text1",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        -4944,
+        8128
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT title, description, required_skills, job_id FROM job_descriptions WHERE job_id = $1 LIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [ $node['Webhook - Upload Resume1'].json.body.jobId ] }}"
+        }
+      },
+      "id": "76a99b7f-98f0-4f9d-b777-49c0707656ce",
+      "name": "Get Job Description1",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -4752,
+        8128
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "rIf08RGeopXERjBF",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/resume/score-with-embeddings",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ resume_text: $node['Extract PDF Text1'].json.text || 'No content', job_description: ($json.title || 'Job') + '\\n' + ($json.description || '') + '\\nSkills: ' + ($json.required_skills || ''), job_id: $json.job_id || $node['Webhook - Upload Resume1'].json.body.jobId || '' }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "ef6f4954-7185-40c6-919a-1f06b835ae3a",
+      "name": "Score Resume with AI1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -4544,
+        8128
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO resume_data (job_id, candidate_name, email, phone, resume_url, interview_status, ai_score, skills, email_sent) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false) ON CONFLICT (job_id, email) DO UPDATE SET candidate_name = EXCLUDED.candidate_name, phone = EXCLUDED.phone, resume_url = EXCLUDED.resume_url, interview_status = EXCLUDED.interview_status, ai_score = EXCLUDED.ai_score, skills = EXCLUDED.skills RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $node['Webhook - Upload Resume1'].json.body.jobId || 'JOB-001', $json.candidate_name || 'Unknown', $json.email || '', $json.phone || '', $node['Webhook - Upload Resume1'].json.body.fileName || 'Unknown_File', ($json.shortlisted ? 'SHORTLISTED' : 'REJECTED'), $json.score || 0, (typeof $json.skills === 'object' ? $json.skills.join(', ') : ($json.skills || '')) ] }}"
+        }
+      },
+      "id": "fb2d4240-bbae-4537-9c73-915fdf1dd909",
+      "name": "Save to Database1",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -4352,
+        8128
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "rIf08RGeopXERjBF",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/notifications",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ type: 'info', title: 'Resume Screened', message: 'Candidate ' + ($node['Score Resume with AI1'].json.candidate_name || $json.candidate_name || 'Unknown') + ' has been processed. Result: ' + ($node['Score Resume with AI1'].json.shortlisted ? 'SHORTLISTED' : 'REJECTED'), target_role: 'recruiter' }) }}",
+        "options": {}
+      },
+      "id": "72262641-9911-4e9c-82ff-b79751ea6c10",
+      "name": "Push Screening Alert1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -4144,
+        8336
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $node['Score Resume with AI1'].json.shortlisted }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "08dd9f24-a801-4e25-b64d-60d0e7d385c6",
+      "name": "Check if Shortlisted1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -4144,
+        8128
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/email/resume-shortlisted",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ candidate_email: $node['Score Resume with AI1'].json.email, candidate_name: $node['Score Resume with AI1'].json.candidate_name, job_id: $node['Score Resume with AI1'].json.job_id || '', job_title: $node['Score Resume with AI1'].json.job_title || $node['Score Resume with AI1'].json.position || $node['Score Resume with AI1'].json.role || '', role: $node['Score Resume with AI1'].json.role || $node['Score Resume with AI1'].json.job_title || $node['Score Resume with AI1'].json.position || '' }) }}",
+        "options": {}
+      },
+      "id": "2d37e0c4-0e30-4565-920c-fe5258a191ed",
+      "name": "Generate Shortlist Email1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -3952,
+        8032
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.brevo.com/v3/smtp/email",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "api-key",
+              "value": "={{ $env.BREVO_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ sender: { name: 'HR Recruiting Team', email: 'workspace3705@gmail.com' }, to: [ { email: ($json.recipient_email || $json.candidate_email || $json.email || $('Score Resume with AI1').first().json.email || '').trim().toLowerCase(), name: ($json.recipient_name || $json.candidate_name || $json.name || $('Score Resume with AI1').first().json.candidate_name || 'Candidate') } ], subject: $json.subject, htmlContent: $json.body }) }}",
+        "options": {}
+      },
+      "id": "552c7418-bb1a-4f32-8b9a-611187851fc0",
+      "name": "Send Email via Brevo API1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -3744,
+        8032
+      ],
+      "retryOnFail": true,
+      "maxRetries": 3,
+      "waitBetweenRetries": 5000
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE resume_data SET email_sent = true, sample_oa_sent = true, sample_oa_sent_at = CURRENT_TIMESTAMP WHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ [ $node['Save to Database1'].json.id ] }}"
+        }
+      },
+      "id": "3f3e34f2-5ba3-4235-9cb4-81b8883d603c",
+      "name": "Mark Email Sent1",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -3552,
+        8032
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "rIf08RGeopXERjBF",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, id: $node['Save to Database1'].json.id, candidate_name: $node['Score Resume with AI1'].json.candidate_name, email: $node['Score Resume with AI1'].json.email, score: $node['Score Resume with AI1'].json.score, shortlisted: $node['Score Resume with AI1'].json.shortlisted, email_sent: true, message: 'Resume processed successfully and email sent' }) }}",
+        "options": {}
+      },
+      "id": "2ea9bbde-7eea-4fd7-8cfc-7c76fdf1451a",
+      "name": "Respond Success (Email Sent)1",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        -3344,
+        8032
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, id: $node['Save to Database1'].json.id, candidate_name: $node['Score Resume with AI1'].json.candidate_name, email: $node['Score Resume with AI1'].json.email, score: $node['Score Resume with AI1'].json.score, shortlisted: $node['Score Resume with AI1'].json.shortlisted, email_sent: false, message: 'Resume processed successfully (not shortlisted)' }) }}",
+        "options": {}
+      },
+      "id": "69115f21-173f-4c0c-abe8-f7eeea672b68",
+      "name": "Respond Success (Not Shortlisted)1",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        -3552,
+        8224
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, candidate_name, email FROM resume_data WHERE sample_oa_sent = true AND official_oa_sent = false AND sample_oa_sent_at < CURRENT_TIMESTAMP - INTERVAL '2 minutes';",
+        "options": {}
+      },
+      "id": "390fcd4f-bca0-4119-82e1-cd06f107dc5b",
+      "name": "Fetch Ready for Official OA1",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -4944,
+        8528
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "rIf08RGeopXERjBF",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/email/oa-original",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ candidate_email: $json.email, candidate_name: $json.candidate_name }) }}",
+        "options": {}
+      },
+      "id": "7e6bf615-e41c-407c-af39-f3c2cd9f512e",
+      "name": "Generate Official OA Email1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -4736,
+        8528
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "e91d97e4-e06d-4057-8947-ed6f2385c453",
+              "leftValue": "skipped",
+              "rightValue": "true",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "98590eda-44b7-4df9-83c0-d473fb27769b",
+      "name": "Filter Valid Emails1",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        -4544,
+        8528
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.brevo.com/v3/smtp/email",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "api-key",
+              "value": "={{ $env.BREVO_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ sender: { name: 'Engineering Recruitment Team', email: 'workspace3705@gmail.com' }, to: [ { email: $json.recipient_email, name: $json.recipient_name } ], subject: $json.subject, htmlContent: $json.body }) }}",
+        "options": {}
+      },
+      "id": "31d1b8d6-0248-43e7-b2b3-2fe80fe345e0",
+      "name": "Send Official OA Email1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -4368,
+        8528
+      ],
+      "retryOnFail": true,
+      "maxRetries": 3,
+      "waitBetweenRetries": 5000
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE resume_data SET official_oa_sent = true WHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ [ $('Fetch Ready for Official OA1').item.json.id ] }}"
+        }
+      },
+      "id": "2e0d8b2c-de44-4e46-b4ac-48754c0a803a",
+      "name": "Mark Official OA Sent1",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -4176,
+        8528
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "rIf08RGeopXERjBF",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "oa-results",
+        "options": {}
+      },
+      "id": "7b735c47-122c-4cdb-b37f-9d9cf55d43f1",
+      "name": "Webhook - OA Results1",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        -5152,
+        8928
+      ],
+      "webhookId": "oa-results"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE resume_data SET oa_score = $1, oa_status = 'completed', oa_report_url = $2 WHERE email = $3 RETURNING id, candidate_name, email, job_id, ai_score;",
+        "options": {
+          "queryReplacement": "={{ [ $node['Webhook - OA Results1'].json.body.score, $node['Webhook - OA Results1'].json.body.report_url, $node['Webhook - OA Results1'].json.body.candidate_email ] }}"
+        }
+      },
+      "id": "835328b5-81ea-41a3-8760-e084d1b6bfc6",
+      "name": "Update OA Results1",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -4944,
+        8928
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "rIf08RGeopXERjBF",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $node['Webhook - OA Results1'].json.body.score }}",
+              "operation": "largerEqual",
+              "value2": 60
+            }
+          ]
+        }
+      },
+      "id": "748ca727-4d0d-4de6-8df3-f5720af0c25b",
+      "name": "Check OA Pass (>= 60)1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -4752,
+        8928
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://n8n:5678/webhook/schedule-interviews",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  job_id: $node['Webhook - Upload Resume1'].json.body.jobId || 'JOB-001',\n  shortlisted_candidates: [\n    {\n      candidate_name: $node['Score Resume with AI1'].json.candidate_name || $json.candidate_name || 'Unknown',\n      email: $node['Score Resume with AI1'].json.email || $json.email || '',\n      ai_score: $node['Score Resume with AI1'].json.score || $json.ai_score || 0,\n      resume_score: $node['Score Resume with AI1'].json.score || $json.ai_score || 0,\n      interview_status: 'SHORTLISTED',\n      job_title: $node['Score Resume with AI1'].json.job_title || '',\n      job_id: $node['Score Resume with AI1'].json.job_id || $node['Webhook - Upload Resume1'].json.body.jobId || ''\n    }\n  ]\n}) }}",
+        "options": {}
+      },
+      "id": "a009a6d0-feab-4f2d-aa60-0f068ea817d5",
+      "name": "Trigger Interview Scheduling1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -4496,
+        8832
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/email/rejection",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ candidate_email: $json.email, candidate_name: $json.candidate_name }) }}",
+        "options": {}
+      },
+      "id": "33e8b0a8-49d9-4d7f-9d62-37e81b901b9a",
+      "name": "Generate Rejection Email1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -4496,
+        9040
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.brevo.com/v3/smtp/email",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api-key",
+              "value": "={{ $env.BREVO_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ sender: { name: 'HR Recruiting Team', email: 'workspace3705@gmail.com' }, to: [ { email: $json.recipient_email, name: $json.recipient_name } ], subject: $json.subject, htmlContent: $json.body }) }}",
+        "options": {}
+      },
+      "id": "7f1e0ef6-499e-4956-9d07-2f1b71376d1c",
+      "name": "Send Rejection Email1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -4288,
+        9040
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/notifications",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ type: 'success', title: 'Interview Scheduling Triggered', message: 'Candidate ' + ($node['Score Resume with AI1'].json.candidate_name || $json.candidate_name || 'Unknown') + ' with resume score ' + ($node['Score Resume with AI1'].json.score || $json.ai_score || 0) + ' has been sent for interview scheduling.', target_role: 'recruiter' }) }}",
+        "options": {}
+      },
+      "id": "94dea7d8-c8a2-4551-934f-82abb7a40d8b",
+      "name": "Push Growth Alert1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -4288,
+        8832
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 2
+            }
+          ]
+        }
+      },
+      "id": "7e7bd1bd-0d81-4b46-91c6-caf965e3065d",
+      "name": "Schedule Trigger - Every 2 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        -5136,
+        8528
+      ]
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=https://api.brevo.com/v3/smtp/blockedContacts/{{ ($json.recipient_email || $json.candidate_email || $json.email || '').trim().toLowerCase() }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api-key",
+              "value": "={{ $env.BREVO_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "2c26fbac-6425-4e61-a493-652c3e6c1e90",
+      "name": "Unblock Shortlist Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -4000,
+        8032
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=https://api.brevo.com/v3/smtp/blockedContacts/{{ ($json.recipient_email || $json.candidate_email || $json.email || '').trim().toLowerCase() }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api-key",
+              "value": "={{ $env.BREVO_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "437dfd33-dbef-4094-ae06-b7645993de36",
+      "name": "Unblock OA Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -4624,
+        8528
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=https://api.brevo.com/v3/smtp/blockedContacts/{{ ($json.recipient_email || $json.candidate_email || $json.email || '').trim().toLowerCase() }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api-key",
+              "value": "={{ $env.BREVO_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "6e3817d8-ce62-4a0d-b370-318bcf820bb2",
+      "name": "Unblock Rejection Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -4544,
+        9040
+      ],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Webhook - Upload Resume1": {
+      "main": [
+        [
+          {
+            "node": "Extract PDF Text1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract PDF Text1": {
+      "main": [
+        [
+          {
+            "node": "Get Job Description1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Job Description1": {
+      "main": [
+        [
+          {
+            "node": "Score Resume with AI1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score Resume with AI1": {
+      "main": [
+        [
+          {
+            "node": "Save to Database1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to Database1": {
+      "main": [
+        [
+          {
+            "node": "Check if Shortlisted1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Push Screening Alert1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check if Shortlisted1": {
+      "main": [
+        [
+          {
+            "node": "Generate Shortlist Email1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Trigger Interview Scheduling1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Success (Not Shortlisted)1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Shortlist Email1": {
+      "main": [
+        [
+          {
+            "node": "Unblock Shortlist Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email via Brevo API1": {
+      "main": [
+        [
+          {
+            "node": "Mark Email Sent1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Email Sent1": {
+      "main": [
+        [
+          {
+            "node": "Respond Success (Email Sent)1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Ready for Official OA1": {
+      "main": [
+        [
+          {
+            "node": "Generate Official OA Email1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Official OA Email1": {
+      "main": [
+        [
+          {
+            "node": "Filter Valid Emails1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Valid Emails1": {
+      "main": [
+        [
+          {
+            "node": "Unblock OA Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Official OA Email1": {
+      "main": [
+        [
+          {
+            "node": "Mark Official OA Sent1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook - OA Results1": {
+      "main": [
+        [
+          {
+            "node": "Update OA Results1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update OA Results1": {
+      "main": [
+        [
+          {
+            "node": "Check OA Pass (>= 60)1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check OA Pass (>= 60)1": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Generate Rejection Email1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger Interview Scheduling1": {
+      "main": [
+        [
+          {
+            "node": "Push Growth Alert1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Rejection Email1": {
+      "main": [
+        [
+          {
+            "node": "Unblock Rejection Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger - Every 2 minutes": {
+      "main": [
+        [
+          {
+            "node": "Fetch Ready for Official OA1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unblock Shortlist Email": {
+      "main": [
+        [
+          {
+            "node": "Send Email via Brevo API1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unblock OA Email": {
+      "main": [
+        [
+          {
+            "node": "Send Official OA Email1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unblock Rejection Email": {
+      "main": [
+        [
+          {
+            "node": "Send Rejection Email1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

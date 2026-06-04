@@ -12,31 +12,36 @@ import requests
 from backend.services.resume_service import parse_resume, save_resume_to_db, save_resumes_batch
 from backend.database import get_db_connection
 from backend.phase_logger import log_phase_completion
-from backend.routers import email_router
+from backend.api import email_router
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
 
-app = FastAPI(title="HR Automation Agent API")  # v3: force reload
+app = FastAPI(title="HR Automation Agent API")                    
+
+Instrumentator().instrument(app).expose(app, endpoint="/api/metrics")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origin_regex="https?://.*",
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(email_router.router)
-from backend.routers import job_router, auth_router, candidate_router, notification_router, oa_router
+from backend.api import job_router, auth_router, candidate_router, notification_router, oa_router, admin_router, websocket_router
 app.include_router(job_router.router)
 app.include_router(auth_router.router)
 app.include_router(candidate_router.router)
 app.include_router(notification_router.router)
 app.include_router(oa_router.router)
 app.include_router(oa_router.webhook_router)
+app.include_router(admin_router.router)
+app.include_router(websocket_router.router)
 
 @app.on_event("startup")
 async def startup_event():
-    # Keep local uvicorn runs aligned with docker startup behavior.
+
     from backend.init_db import init_db
     init_db()
 
@@ -45,10 +50,9 @@ async def startup_event():
         if hasattr(route, "path"):
             print(f"   Route: {route.path}")
     print("------------------------------------------")
-    
+
     global scheduler, feedback_service, onboarding_service, resume_agent, matcher_service
-    
-    # Import services here to avoid "app not loaded" or multiprocessing issues
+
     from backend.services.scheduling_service import SchedulingService
     from backend.services.feedback_service import FeedbackService
     from backend.services.onboarding_service import OnboardingService
@@ -60,11 +64,9 @@ async def startup_event():
     feedback_service = FeedbackService()
     onboarding_service = OnboardingService()
     resume_agent = ResumeAnalyzerAgent()
-    # matcher_service = get_matching_service()  # Uses singleton to avoid double model loading
+    matcher_service = get_matching_service()                                                                
     print("--> STARTUP: Services initialized.")
 
-# Services
-# Services (initialized in startup_event)
 scheduler = None
 feedback_service = None
 onboarding_service = None
@@ -80,7 +82,7 @@ def _repair_incomplete_scheduled_interviews():
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # Active interview rows ordered by creation.
+
             cur.execute(
                 """
                 SELECT id, interviewer_id, candidate_name, candidate_email, scheduled_time, created_at
@@ -94,7 +96,6 @@ def _repair_incomplete_scheduled_interviews():
                 conn.rollback()
                 return
 
-            # Canonical shortlist source after screening - prioritize interview_status = 'shortlisted'
             cur.execute(
                 """
                 SELECT
@@ -125,7 +126,6 @@ def _repair_incomplete_scheduled_interviews():
             ]
             shortlist_emails = {email for _name, email in shortlist}
 
-            # Track active rows already correctly bound to shortlist emails.
             bound_emails = set()
             repaired = 0
             now_utc = datetime.now(timezone.utc)
@@ -141,12 +141,10 @@ def _repair_incomplete_scheduled_interviews():
                     if sched_dt <= now_utc + timedelta(minutes=30):
                         time_bad = True
 
-                # Keep valid, uniquely mapped shortlist rows.
                 if email_norm and email_norm in shortlist_emails and email_norm not in bound_emails and not name_bad and not time_bad:
                     bound_emails.add(email_norm)
                     continue
 
-                # Assign next unbound shortlisted candidate.
                 pick_name = None
                 pick_email = None
                 for s_name, s_email in shortlist:
@@ -156,7 +154,6 @@ def _repair_incomplete_scheduled_interviews():
                         bound_emails.add(s_email)
                         break
 
-                # If no shortlisted candidate remains, cancel placeholder duplicate rows.
                 if not pick_email:
                     cur.execute(
                         """
@@ -170,7 +167,6 @@ def _repair_incomplete_scheduled_interviews():
                     repaired += 1
                     continue
 
-                # Deterministic next-day slot in UTC for repaired rows.
                 next_day = (now_utc + timedelta(days=1)).date()
                 hour_slot = 10 + (int(row_id) % 4)
                 fixed_time = datetime(
@@ -213,7 +209,7 @@ def _repair_incomplete_scheduled_interviews():
 def process_batch_files(files_data: List[Dict], user_id: int):
     """Background task to process files and save to DB."""
     try:
-        # files_data is a list of {"filename": str, "content": bytes}
+
         parsed_data = []
         for f in files_data:
             try:
@@ -221,7 +217,7 @@ def process_batch_files(files_data: List[Dict], user_id: int):
                 parsed_data.append(data)
             except Exception as e:
                 print(f"Error parsing {f['filename']}: {e}")
-        
+
         if parsed_data:
             save_resumes_batch(parsed_data, user_id)
             print(f"Values saved for batch of {len(parsed_data)} files")
@@ -229,23 +225,23 @@ def process_batch_files(files_data: List[Dict], user_id: int):
                 "Resume Screening",
                 f"batch_processed={len(parsed_data)} user_id={user_id}",
             )
-            
+
     except Exception as e:
         print(f"Batch processing failed: {e}")
 
-# --- Phase 2: Resume Screening ---
 @app.post("/resume/upload-batch")
-async def upload_resume_batch(background_tasks: BackgroundTasks, files: List[UploadFile] = File(...), user_id: int = 1):
+async def upload_resume_batch(files: List[UploadFile] = File(...), user_id: int = 1):
     try:
-        # Read files into memory (careful with large batches, but 50 files * 1MB = 50MB is fine)
-        # If files are too large, we should save to disk first. Assuming controlled batch size from frontend.
+        import base64
         files_data = []
         for file in files:
             content = await file.read()
-            files_data.append({"filename": file.filename, "content": content})
-        
-        background_tasks.add_task(process_batch_files, files_data, user_id)
-        
+            content_b64 = base64.b64encode(content).decode('utf-8')
+            files_data.append({"filename": file.filename, "content_b64": content_b64})
+
+        from backend.workers.tasks import process_batch_files_task
+        process_batch_files_task.delay(files_data, user_id)
+
         return {"status": "processing", "message": f"Received {len(files)} files for processing in background."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -274,20 +270,20 @@ async def resume_sentiment(file: Optional[UploadFile] = File(None), req_text: Op
     try:
         resume_text = None
         filename = None
-        
+
         if file:
-            # File upload path
+
             content = await file.read()
             data = parse_resume(content, file.filename)
             resume_text = data['raw_text']
             filename = file.filename
         elif req_text:
-            # Raw text path
+
             resume_text = req_text
             filename = "text_input"
         else:
             raise HTTPException(status_code=400, detail="Provide either file or req_text parameter")
-        
+
         analysis = resume_agent.analyze_sentiment_and_summary(resume_text)
         return {"filename": filename, "analysis": analysis, "status": "success"}
     except HTTPException:
@@ -309,14 +305,12 @@ def score_resume_with_embeddings(req: ResumeScoreRequest):
     try:
         from backend.services.matching_service import get_matching_service
         from backend.services.resume_service import extract_name, extract_email, extract_contact_number, extract_skills
-        
-        # Use proper parsing functions for accurate extraction
+
         name = extract_name(req.resume_text) or "Unknown"
         email = extract_email(req.resume_text) or ""
         phone = extract_contact_number(req.resume_text) or ""
         skills = extract_skills(req.resume_text)
-        
-        # Use singleton MatchingService (avoids reloading the model each call)
+
         matching_service = get_matching_service()
         resume_data = [{
             'name': name,
@@ -325,14 +319,13 @@ def score_resume_with_embeddings(req: ResumeScoreRequest):
             'resume_text': req.resume_text,
             'skills': skills
         }]
-        
+
         scored_results = matching_service.score_new_resumes_for_job(
             job_description=req.job_description,
             resume_data_list=resume_data,
             threshold=35.0
         )
-        
-        # Always return a result, even if scoring partially fails
+
         if scored_results:
             result = scored_results[0]
             skills_str = ", ".join(result['skills']) if isinstance(result['skills'], list) else str(result['skills'])
@@ -346,7 +339,7 @@ def score_resume_with_embeddings(req: ResumeScoreRequest):
                 "shortlisted": result['shortlisted']
             }
         else:
-            # Fallback: return with 0 score rather than failing
+
             skills_str = ", ".join(skills) if isinstance(skills, list) else str(skills)
             return {
                 "candidate_name": name,
@@ -357,19 +350,18 @@ def score_resume_with_embeddings(req: ResumeScoreRequest):
                 "summary": "Scoring model unavailable",
                 "shortlisted": False
             }
-            
+
     except Exception as e:
         print(f"Error in score_resume_with_embeddings: {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.post("/utils/extract-text")
 async def extract_text_from_file(file: UploadFile = File(...)):
     try:
         content = await file.read()
-        # reusing parse_resume to extract text
+
         data = parse_resume(content, file.filename)
         return {"filename": file.filename, "text": data['raw_text']}
     except Exception as e:
@@ -401,11 +393,9 @@ def match_resumes_to_jd(req: MatchRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- Phase 3: Scheduling ---
 def _is_placeholder_candidate_name(name: Optional[str]) -> bool:
     value = (name or "").strip().lower()
     return value in ("", "candidate", "unknown", "n/a", "na", "-")
-
 
 def _resolve_candidate_payload(candidate_email: str, candidate_name: Optional[str]) -> Dict[str, str]:
     normalized_email = (candidate_email or "").strip().lower()
@@ -436,7 +426,7 @@ def _resolve_candidate_payload(candidate_email: str, candidate_name: Optional[st
             if row and row[0] and str(row[0]).strip():
                 resolved_name = str(row[0]).strip()
     except Exception:
-        # Best-effort name enrichment; scheduler has additional fallback logic.
+
         resolved_name = ""
     finally:
         if conn:
@@ -452,7 +442,6 @@ def _resolve_candidate_payload(candidate_email: str, candidate_name: Optional[st
             ).title()
 
     return {"email": normalized_email, "name": resolved_name or "Candidate"}
-
 
 class ScheduleRequest(BaseModel):
     candidate_email: str
@@ -484,7 +473,6 @@ def schedule_interview(req: ScheduleRequest):
 def get_availability(interviewer_id: int, date: str):
     return scheduler.get_availability(interviewer_id, date)
 
-
 class SlotOptionsRequest(BaseModel):
     interviewer_ids: List[int]
     days_ahead: int = 1
@@ -504,7 +492,6 @@ def get_slot_options(req: SlotOptionsRequest):
         return {"slots": slots}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 class AssignPanelRequest(BaseModel):
     job_title: str = ""
@@ -527,7 +514,6 @@ def assign_panel(req: AssignPanelRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 class RescheduleRequest(BaseModel):
     interview_id: int
     candidate_email: str
@@ -549,7 +535,6 @@ def reschedule_interview(req: RescheduleRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 class NoShowRequest(BaseModel):
     interview_id: int
 
@@ -561,7 +546,6 @@ def flag_no_show(req: NoShowRequest):
         return {"status": "no_show_flagged", "interview_id": req.interview_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/interview/check-no-shows")
 def check_no_shows(grace_minutes: int = 15):
@@ -578,7 +562,6 @@ def check_no_shows(grace_minutes: int = 15):
         return {"flagged_count": len(results), "interview_ids": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/interview/send-feedback-kits")
 def send_feedback_kits(window_minutes: int = 15):
@@ -607,7 +590,6 @@ def send_feedback_kits(window_minutes: int = 15):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.post("/interview/decision/{interview_id}")
 def apply_decision(interview_id: int):
     """
@@ -617,7 +599,6 @@ def apply_decision(interview_id: int):
     try:
         decision = scheduler.aggregate_feedback_and_decide(interview_id)
 
-        # Fetch candidate info
         conn = get_db_connection()
         from psycopg2.extras import RealDictCursor
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -653,8 +634,6 @@ def apply_decision(interview_id: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
-# --- Phase 4: Feedback ---
 class FeedbackRequest(BaseModel):
     interview_id: int
     technical_skills: int
@@ -662,7 +641,6 @@ class FeedbackRequest(BaseModel):
     overall_rating: int
     recommendation: str
     detailed_feedback: str
-
 
 class FeedbackCollectRequest(BaseModel):
     interview_id: Optional[int] = None
@@ -675,7 +653,6 @@ class FeedbackCollectRequest(BaseModel):
     overall_rating: int
     recommendation: str
     comments: str
-
 
 def trigger_feedback_collection_workflow(feedback_payload: Dict) -> Dict:
     """
@@ -714,7 +691,6 @@ def submit_feedback(req: FeedbackRequest):
         return {"status": "submitted"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/interview/feedback/collect")
 def collect_feedback(req: FeedbackCollectRequest):
@@ -810,12 +786,18 @@ def collect_feedback(req: FeedbackCollectRequest):
         if conn:
             conn.close()
 
-# --- Interview Status ---
 @app.get("/jobs/interviewstatus")
-def get_interview_status_main():
+def get_interview_status_main(force_fresh: bool = False):
     """Get comprehensive interview status for all candidates."""
     import traceback
-    from backend.database import get_db_connection
+    from backend.database import get_db_connection, cache_get, cache_set
+
+    cache_key = "cache:interview_status"
+    if not force_fresh:
+        cached = cache_get(cache_key)
+        if cached:
+            print("--> CACHE HIT: Returning cached interview status")
+            return cached
 
     def _derive_name_from_email(raw_email: Optional[str]) -> str:
         email = (raw_email or "").strip().lower()
@@ -827,7 +809,7 @@ def get_interview_status_main():
 
     conn = None
     try:
-        # Keep dashboard resilient when n8n inserted placeholder interview rows.
+
         _repair_incomplete_scheduled_interviews()
 
         print("--> DEBUG: Attempting to get DB connection for interview status...")
@@ -908,12 +890,12 @@ def get_interview_status_main():
 
             sched = iv['scheduled_time']
             original_status = (iv.get('interview_status') or '').strip().lower()
-            # Normalise to UTC-aware datetime
+
             if sched is not None:
                 if sched.tzinfo is None:
                     sched = sched.replace(tzinfo=timezone.utc)
                 end_time = sched + timedelta(hours=1)
-                # Keep workflow-driven feedback states visible in the completed section.
+
                 stored = (iv['interview_status'] or '').lower()
                 if stored in (
                     'feedback_accepted',
@@ -924,15 +906,13 @@ def get_interview_status_main():
                     'decision_hold',
                 ) or iv['feedback_submitted']:
                     iv['interview_status'] = 'completed'
-                # Only override if the stored status is not already cancelled/completed-with-feedback
+
                 if stored not in ('cancelled',) and not iv['feedback_submitted']:
                     if sched <= now <= end_time:
                         iv['interview_status'] = 'in_progress'
                     elif now > end_time and stored == 'scheduled':
                         iv['interview_status'] = 'completed'
 
-            # If a row still has an unrecognized status, make it visible in the dashboard
-            # instead of leaving it in an unrendered bucket.
             if iv.get('interview_status') not in ('scheduled', 'in_progress', 'completed', 'cancelled'):
                 if iv.get('feedback_submitted') or original_status in (
                     'feedback_accepted',
@@ -949,7 +929,6 @@ def get_interview_status_main():
                     iv['interview_status'] = 'in_progress'
             interviews.append(iv)
 
-        # Categorise by computed status
         scheduled   = [i for i in interviews if i.get('interview_status') == 'scheduled']
         in_progress = [i for i in interviews if i.get('interview_status') == 'in_progress']
         completed   = [i for i in interviews if i.get('interview_status') == 'completed']
@@ -966,6 +945,7 @@ def get_interview_status_main():
             "pending_feedback": sum(1 for i in interviews if i.get('interview_status') in ('completed', 'in_progress') and not i.get('feedback_submitted'))
         }
         print(f"--> DEBUG: Returning interview status result summary: total={result['total_interviews']}")
+        cache_set(cache_key, result, ttl=10)
         return result
     except Exception as e:
         print(f"CRITICAL ERROR in get_interview_status_main: {str(e)}")
@@ -973,13 +953,14 @@ def get_interview_status_main():
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        conn.close()
-
+        if conn:
+            conn.close()
 
 @app.delete("/jobs/clear-interviews")
 def clear_all_interviews():
     """Remove all interview schedule records (for cleanup / demo reset)."""
-    from backend.database import get_db_connection
+    from backend.database import get_db_connection, cache_delete
+    cache_delete("cache:interview_status")
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -992,7 +973,6 @@ def clear_all_interviews():
     finally:
         conn.close()
 
-# --- Phase 5: Onboarding ---
 class OnboardingRequest(BaseModel):
     candidate_email: str
     role: str
@@ -1014,7 +994,42 @@ def initiate_onboarding(req: OnboardingRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- Feedback Form Endpoint ---
+@app.get("/onboarding/tasks")
+def list_onboarding_tasks():
+    conn = get_db_connection()
+    try:
+        from psycopg2.extras import RealDictCursor
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS onboarding_tasks (
+                    id SERIAL PRIMARY KEY,
+                    candidate_email VARCHAR(255),
+                    status VARCHAR(50),
+                    offer_letter_text TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+            
+            cur.execute("""
+                SELECT o.id, o.candidate_email, o.status, o.offer_letter_text, o.created_at, r.candidate_name
+                FROM onboarding_tasks o
+                LEFT JOIN resume_data r ON LOWER(o.candidate_email) = LOWER(r.email)
+                ORDER BY o.created_at DESC
+            """)
+            rows = cur.fetchall() or []
+            formatted = []
+            for r in rows:
+                d = dict(r)
+                if d.get("created_at"):
+                    d["created_at"] = d["created_at"].isoformat()
+                formatted.append(d)
+            return formatted
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
 @app.get("/feedback-form.html", response_class=HTMLResponse)
 async def serve_feedback_form():
     """Serve the interview feedback form HTML page."""
@@ -1022,9 +1037,8 @@ async def serve_feedback_form():
         backend_root = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.dirname(backend_root)
 
-        # Prefer project frontend file for local runs; fallback to backend copy for Docker image.
         candidate_paths = [
-            os.path.join(project_root, "frontend", "feedback-form.html"),
+            os.path.join(project_root, "frontend", "public", "feedback-form.html"),
             os.path.join(backend_root, "feedback-form.html"),
         ]
 
@@ -1043,9 +1057,8 @@ async def serve_feedback_form():
 
 if __name__ == "__main__":
     import uvicorn
-    # Set PYTHONPATH for reload subprocesses to find 'backend' module
+
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.environ["PYTHONPATH"] = project_root + os.pathsep + os.environ.get("PYTHONPATH", "")
 
-    # Run with reload enabled
     uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)

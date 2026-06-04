@@ -2,11 +2,10 @@ import re
 import os
 from typing import List, Dict, Any, Optional, Tuple
 import json
-import fitz  # PyMuPDF
+import fitz           
 from docx import Document
 from backend.database import get_db_connection
 
-# Regex Patterns
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 PHONE_RE = re.compile(
     r"(\+\d{1,3}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,9}"
@@ -35,7 +34,6 @@ HEADER_STOP_WORDS = {
     "college", "board", "class", "standard", "state", "country", "city", "address",
     "contact", "linkedin", "github", "email", "phone", "mobile", "website", "portfolio"
 }
-
 
 SKILLS_DB = {
     "python", "java", "c++", "c#", ".net", "javascript", "typescript", "react", "angular", "vue", "node.js", "express",
@@ -107,8 +105,7 @@ def extract_name(text: str) -> Optional[str]:
     if candidates:
         candidates.sort(key=lambda x: (-x[0], x[1]))
         return candidates[0][2]
-    
-    # Fallback strategies
+
     if contact_idx and contact_idx > 0:
         for j in range(max(0, contact_idx - 3), contact_idx):
             l = lines[j]
@@ -116,11 +113,11 @@ def extract_name(text: str) -> Optional[str]:
                 tokens = re.findall(r"[A-Za-z][A-Za-z'’\-]*\.?", l)
                 if 1 <= len(tokens) <= 5:
                     return " ".join(t.strip(" .") for t in tokens)
-    
+
     m = EMAIL_RE.search("\n".join(lines[:100]))
     if m:
         return guess_name_from_email(m.group(0))
-        
+
     return None
 
 def extract_contact_number(text: str) -> Optional[str]:
@@ -130,7 +127,7 @@ def extract_contact_number(text: str) -> Optional[str]:
         cleaned = re.sub(r"[^\d\+]", "", match)
         if 8 <= len(cleaned.replace("+", "")) <= 15 and match not in all_matches:
             all_matches.append(match)
-    
+
     if not all_matches: return None
 
     def phone_score(phone: str) -> int:
@@ -144,16 +141,15 @@ def extract_contact_number(text: str) -> Optional[str]:
     return all_matches[0]
 
 def extract_email(text: str) -> Optional[str]:
-    # Try finding "Email:" or similar label first for higher confidence
+
     lines = text.splitlines()
-    for line in lines[:50]: # Look in first 50 lines usually
+    for line in lines[:50]:                                 
         if re.search(r"(email|e-mail|mail)\s*[:|-]", line, re.IGNORECASE):
-            # Extract email from this line
+
             matches = EMAIL_RE.findall(line)
             if matches:
                  return matches[0]
 
-    # Fallback to general search
     matches = EMAIL_RE.findall(text)
     if matches:
         for email in matches:
@@ -164,25 +160,20 @@ def extract_email(text: str) -> Optional[str]:
 def extract_skills(text: str) -> List[str]:
     found_skills = set()
     text_lower = text.lower()
-    
-    # Check for multi-word skills first to avoid partial matches
-    # (e.g. "machine learning" vs "learning")
+
     for skill in SKILLS_DB:
         if skill in text_lower:
-            # Simple check, can be improved with regex boundaries for short words like 'go' or 'c'
-            # For short skills, ensure word boundary
+
             if len(skill) <= 3:
                 if re.search(r"\b" + re.escape(skill) + r"\b", text_lower):
                     found_skills.add(skill)
             else:
                 found_skills.add(skill)
-                
+
     return list(found_skills)
 
-
 def extract_education(text: str) -> List[str]:
-    # Regex patterns for degrees to handle variations like "B. Tech", "B.Tech", "BTech", "Bachelor of ..."
-    # We use \b boundary or start of string to avoid matching inside words
+
     degree_patterns = [
         r"(?i)\bB\.?\s*Tech\b", r"(?i)\bM\.?\s*Tech\b", 
         r"(?i)\bB\.?\s*E\b", r"(?i)\bM\.?\s*E\b",
@@ -192,87 +183,76 @@ def extract_education(text: str) -> List[str]:
         r"(?i)\bB\.?\s*Com\b", r"(?i)\bM\.?\s*Com\b",
         r"(?i)\bBachelor\b", r"(?i)\bMaster\b"
     ]
-    
+
     college_keywords = ["University", "Institute", "College", "School", "Academy", "IIT", "NIT", "BITS", "IIIT", "Vellore", "Manipal", "Pilani"]
-    
-    # Words that suggest this line is NOT about education but merely mentions it (e.g. "Project using ...")
+
     noise_keywords = ["project", "experience", "work", "developed", "using", "intern", "internship", "skill", "certificate", "certifications"]
 
     entries = []
     lines = text.splitlines()
-    
+
     i = 0
     while i < len(lines):
         line = lines[i].strip()
-        
-        # skip empty
+
         if not line:
             i += 1
             continue
 
-        # 1. Clean line
-        # Remove URLs/Emails/Phone
         line = re.sub(r"(https?://)?(www\.)?(github\.com|linkedin\.com)\S+", "", line, flags=re.IGNORECASE)
         line = re.sub(r"\S+@\S+", "", line)
-        line = re.sub(r"[\(\[\{]?\+?\d[\d\-\s]{8,}\d[\)\]\}]?", "", line) # Approximate phone removal
-        
-        # Check for noise
+        line = re.sub(r"[\(\[\{]?\+?\d[\d\-\s]{8,}\d[\)\]\}]?", "", line)                            
+
         if any(bad in line.lower() for bad in noise_keywords):
             i += 1
             continue
 
-        # Check for degree using regex
         found_degree = None
         cleaned_line = re.sub(r"\s+", " ", line).strip()
-        
+
         for pat in degree_patterns:
             m = re.search(pat, cleaned_line)
             if m:
                 found_degree = m.group(0)
                 break
-        
+
         if found_degree:
-            # Found a candidate line
-            
-            # Split by delimiters to isolate degree
+
             parts = re.split(r"[|•·]", cleaned_line)
             degree_text = ""
             for part in parts:
                 if re.search(re.escape(found_degree), part):
                     degree_text = part.strip()
                     break
-            
+
             if not degree_text: 
                 degree_text = cleaned_line
 
-            if len(degree_text) < 4: # Too short e.g. "B.E" standing alone might be okay but risky
-                # check if there is college info in this line, if so keep it
+            if len(degree_text) < 4:                                                              
+
                 if not any(ck.lower() in degree_text.lower() for ck in college_keywords):
                      i += 1
                      continue
 
             college = None
             cgpa = None
-            
-            # Look for College and CGPA in context
+
             start_idx = max(0, i - 2)
-            end_idx = min(len(lines), i + 4) # Expanded window slightly
+            end_idx = min(len(lines), i + 4)                           
             context_lines = lines[start_idx:end_idx]
-            
+
             for ctx_line in context_lines:
                 c_line = ctx_line.strip()
-                # Skip noise lines in context too
+
                 if any(bad in c_line.lower() for bad in noise_keywords): continue
 
-                # Find College
                 if not college and any(ck in c_line for ck in college_keywords):
-                    # Heuristic: Colleges usually have reasonable length, not a full paragraph
+
                     if 10 < len(c_line) < 100:
                         college = c_line
-                
-                # Find CGPA / Percentage
+
                 if not cgpa:
-                    # Look for "CGPA: 8.5" or "8.5/10" or "85%"
+
                     cgpa_match = re.search(r"\b(?:CGPA|SGPA|GPA)\s*[:=-]?\s*(\d+(?:\.\d+)?)", c_line, re.IGNORECASE)
                     if cgpa_match:
                         cgpa = f"CGPA: {cgpa_match.group(1)}"
@@ -283,39 +263,33 @@ def extract_education(text: str) -> List[str]:
                              if 40 <= val <= 100:
                                  cgpa = f"{val}%"
 
-            # Assemble entry
             entry_parts = [degree_text]
-            
+
             if college:
-                # Dedupe college if already in degree text
-                # Normalize both to alphanumeric lowercase for comparison
+
                 simp_col = re.sub(r"[^\w]", "", college.lower())
                 simp_deg = re.sub(r"[^\w]", "", degree_text.lower())
-                
-                # If the college string is substantially inside the degree string, don't add it
-                # Logic: check if simp_col is a substring of simp_deg
+
                 if simp_col not in simp_deg:
-                     # Check overlap? e.g. "IIT Bombay" vs "B.Tech IIT Bombay"
+
                      entry_parts.append(college)
-            
+
             if cgpa:
                 entry_parts.append(cgpa)
-            
+
             full_entry = ", ".join(entry_parts)
-            
-            # Final dedupe against list
-            # We use fuzzy matching again to avoid "B.Tech, IIT" and "B.Tech" duplication
+
             is_dup = False
             for e in entries:
                 if degree_text in e: 
                     is_dup = True
                     break
-            
+
             if not is_dup:
                 entries.append(full_entry)
-        
+
         i += 1
-                
+
     return entries[:3]
 
 def extract_text_and_links_from_pdf_stream(file_stream: bytes) -> Tuple[str, List[str]]:
@@ -325,7 +299,7 @@ def extract_text_and_links_from_pdf_stream(file_stream: bytes) -> Tuple[str, Lis
         links = []
         for page in doc:
             text += page.get_text() + "\n"
-            # Extract links
+
             page_links = page.get_links()
             for link in page_links:
                 if "uri" in link:
@@ -335,26 +309,56 @@ def extract_text_and_links_from_pdf_stream(file_stream: bytes) -> Tuple[str, Lis
     except Exception as e:
         raise ValueError(f"PDF read failed: {e}")
 
+def extract_text_from_doc(file_content: bytes) -> str:
+    import io
+    text_runs = []
+    
+    # Try UTF-16LE extraction (very common for .doc files)
+    try:
+        raw_unicode = file_content.decode("utf-16-le", errors="ignore")
+        matches = re.findall(r"[\x20-\x7E\s\n\r\t]{4,}", raw_unicode)
+        if matches:
+            text_runs.extend(matches)
+    except Exception:
+        pass
+        
+    # Try ASCII extraction
+    try:
+        raw_ascii = file_content.decode("ascii", errors="ignore")
+        matches = re.findall(r"[\x20-\x7E\s\n\r\t]{4,}", raw_ascii)
+        if matches:
+            text_runs.extend(matches)
+    except Exception:
+        pass
+
+    text = "\n".join(text_runs)
+    lines = []
+    for line in text.splitlines():
+        line_clean = re.sub(r"[^\x20-\x7E\s]", "", line).strip()
+        if len(line_clean) > 3 and not any(mark in line_clean.lower() for mark in ["normal.dotm", "microsoft word", "title", "subject", "creator"]):
+            lines.append(line_clean)
+            
+    return "\n".join(lines)
+
 def parse_resume(file_content: bytes, filename: str) -> Dict[str, Any]:
     ext = os.path.splitext(filename)[1].lower()
     text = ""
     links = []
-    
+
     if ext == ".pdf":
         text, links = extract_text_and_links_from_pdf_stream(file_content)
     elif ext == ".docx":
-        # python-docx requires file-like object
         import io
         doc = Document(io.BytesIO(file_content))
         text = "\n".join([p.text for p in doc.paragraphs])
-        # TODO: extracting links from docx is harder with python-docx, skipping for now as per likely PDF usage
+    elif ext == ".doc":
+        text = extract_text_from_doc(file_content)
     else:
         raise ValueError(f"Unsupported file type: {ext}")
-        
+
     name = extract_name(text) or ""
     email = extract_email(text)
-    
-    # Fallback to links for email if not found in text
+
     if not email and links:
         for link in links:
             if link.startswith("mailto:"):
@@ -366,7 +370,7 @@ def parse_resume(file_content: bytes, filename: str) -> Dict[str, Any]:
     phone = extract_contact_number(text) or ""
     skills = extract_skills(text)
     education = extract_education(text)
-    
+
     return {
         "filename": filename,
         "name": name,
@@ -381,7 +385,7 @@ def save_resume_to_db(data: Dict, user_id: int, job_id: str = None):
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            # Insert directly into unified resume_data table
+
             cur.execute("""
                 INSERT INTO resume_data (job_id, candidate_name, email, phone, 
                                          skills, education, interview_status)
@@ -389,10 +393,10 @@ def save_resume_to_db(data: Dict, user_id: int, job_id: str = None):
                 RETURNING id
             """, (job_id or 'DIRECT', data['name'], data['email'], data['mobile'], 
                   data['skills'], data.get('education', '')))
-            
+
             row = cur.fetchone()
             file_id = row[0]
-        
+
         conn.commit()
         return file_id
     except Exception as e:
@@ -414,7 +418,7 @@ def save_resumes_batch(data_list: List[Dict], user_id: int, job_id: str = None) 
                     RETURNING id
                 """, (job_id or 'DIRECT', d['name'], d['email'], d['mobile'],
                       d.get('skills', ''), d.get('education', '')))
-                 
+
                  row = cur.fetchone()
                  file_id = row[0]
                  file_ids.append(file_id)

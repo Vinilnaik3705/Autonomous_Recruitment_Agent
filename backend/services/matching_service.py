@@ -1,7 +1,6 @@
 from typing import List, Dict
 import re
 import os
-import toml
 import threading
 from backend.database import get_db_connection
 import psycopg2.extras
@@ -9,7 +8,6 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 
-# Singleton instance for model caching - avoids reloading the 80MB model on every API call
 _matching_service_instance = None
 
 def get_matching_service():
@@ -19,11 +17,10 @@ def get_matching_service():
         _matching_service_instance = MatchingService()
     return _matching_service_instance
 
-
 class MatchingService:
     def __init__(self):
         self.model = None
-        self.model_lock = threading.Lock()  # Thread-safe lock for model access
+        self.model_lock = threading.Lock()                                     
         self._load_model()
 
     def _load_model(self):
@@ -63,7 +60,6 @@ class MatchingService:
         if not jd_text or not resume_text:
             return 0.0
 
-        # Extended stop words for better signal
         stop_words = {
             'and', 'the', 'is', 'in', 'at', 'of', 'or', 'a', 'an', 'to', 'for', 'with',
             'on', 'by', 'as', 'it', 'that', 'this', 'be', 'are', 'was', 'were', 'will',
@@ -86,7 +82,6 @@ class MatchingService:
         if not jd_words:
             return 0.0
 
-        # Weight each keyword by length (longer = more specific = more valuable)
         total_weight = 0.0
         matched_weight = 0.0
         seen = set()
@@ -94,7 +89,7 @@ class MatchingService:
             if w in seen:
                 continue
             seen.add(w)
-            weight = min(len(w) / 5.0, 2.0)  # Words 5+ chars get weight ≥1.0
+            weight = min(len(w) / 5.0, 2.0)                                  
             total_weight += weight
             if w in resume_words_set:
                 matched_weight += weight
@@ -116,20 +111,18 @@ class MatchingService:
         resume_skills_set = set(s.lower().strip() for s in resume_skills if s and str(s).strip())
 
         if not jd_skills:
-            # If JD has no recognizable skills, give partial credit for having skills
+
             return min(len(resume_skills_set) / 5.0, 1.0) if resume_skills_set else 0.0
 
-        # Exact match score
         exact_matched = jd_skills.intersection(resume_skills_set)
         exact_score = len(exact_matched) / len(jd_skills)
 
-        # Partial match: check if any JD skill is a substring of resume skill or vice versa
         unmatched_jd = jd_skills - exact_matched
         partial_score = 0.0
         for jd_skill in unmatched_jd:
             for r_skill in resume_skills_set:
                 if jd_skill in r_skill or r_skill in jd_skill:
-                    partial_score += 0.5 / len(jd_skills)  # Half credit for partial match
+                    partial_score += 0.5 / len(jd_skills)                                 
                     break
 
         return min(exact_score + partial_score, 1.0)
@@ -140,13 +133,13 @@ class MatchingService:
             return []
 
         clean_jd = self._clean_text(jd_text)
-        
+
         results = []
         conn = get_db_connection()
         try:
             from psycopg2.extras import RealDictCursor
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Fetch resumes - filter by job_id for session isolation
+
                 if job_id:
                     cur.execute("""
                         SELECT id, candidate_name, email, phone, education,
@@ -163,11 +156,10 @@ class MatchingService:
                         ORDER BY id ASC
                     """)
                 resumes = cur.fetchall()
-                
+
                 if not resumes:
                     return []
 
-                # Encode JD (with auto-reload on httpx client closed)
                 try:
                     jd_vector = self._safe_encode(clean_jd)
                 except Exception as e:
@@ -185,28 +177,24 @@ class MatchingService:
                         skills = raw_skills
                     skills = self._clean_text(skills)
 
-                    # Use candidate name, education, and skills for semantic matching
                     name = self._clean_text(res.get('candidate_name', '') or "")
                     education = self._clean_text(res.get('education', '') or "")
                     combined_text = f"Name: {name}\nEducation: {education}\nSkills: {skills}"
-                    
+
                     resume_texts.append(combined_text)
                     resume_metadata.append(res)
-                
+
                 if not resume_texts:
                     return []
 
-                # Encode Resumes (Batch) (with auto-reload on httpx client closed)
                 try:
                     resume_vectors = self._safe_encode(resume_texts)
                 except Exception as e:
                     print(f"Error embedding resumes: {e}")
                     return []
-                
-                # Calculate Cosine Similarity
+
                 jd_vec_np = np.array([jd_vector])
-                
-                # Ensure resume_vectors is a numpy array
+
                 if not isinstance(resume_vectors, np.ndarray):
                     resume_vectors = np.array(resume_vectors)
 
@@ -214,22 +202,19 @@ class MatchingService:
 
                 for idx, res in enumerate(resume_metadata):
                     semantic_score = float(cosine_scores[idx])
-                    
-                    # Calculate Keyword Recall Score
+
                     r_text = resume_texts[idx]
                     keyword_score = self._calculate_keyword_score(clean_jd, r_text)
-                    
-                    # Calculate Skill Match Score
+
                     raw_skills = res.get('skills', '') or ''
                     if isinstance(raw_skills, str):
                         skill_list = [s.strip() for s in raw_skills.split(',') if s.strip()]
                     else:
                         skill_list = list(raw_skills)
                     skill_score = self._calculate_skill_match_score(clean_jd, skill_list)
-                    
-                    # Combined Score: 50% Semantic + 30% Skill Match + 20% Keyword Recall
+
                     final_score = (semantic_score * 0.50) + (skill_score * 0.30) + (keyword_score * 0.20)
-                    
+
                     results.append({
                         "id": res['id'],
                         "Name": res['candidate_name'] or "Unknown Candidate",
@@ -240,12 +225,11 @@ class MatchingService:
                         "File": res.get('job_id') or "Unknown",
                         "Skills": res.get('skills') or ""
                     })
-                
-                # Sort by score descending
+
                 results.sort(key=lambda x: x['MatchScore'], reverse=True)
-                
+
                 return self._deduplicate(results, top_k)
-                
+
         finally:
             conn.close()
 
@@ -262,32 +246,31 @@ class MatchingService:
     def score_new_resumes_for_job(
         self, 
         job_description: str, 
-        resume_data_list: List[Dict],  # List of {name, email, phone, resume_text, skills}
+        resume_data_list: List[Dict],                                                     
         threshold: float = 35.0
     ) -> List[Dict]:
         """
         Score new resumes against a job description using Sentence Transformers.
-        
+
         Args:
             job_description: The job description text
             resume_data_list: List of dicts with resume data
             threshold: Score threshold for shortlisting (0-100 scale)
-            
+
         Returns:
             List of scored candidates with shortlist recommendation
         """
         if not self.model:
             print("Model not loaded.")
             return []
-        
+
         if not resume_data_list:
             return []
-        
+
         try:
-            # Clean and prepare JD
+
             clean_jd = self._clean_text(job_description)
-            
-            # Prepare resume texts
+
             resume_texts = []
             for resume in resume_data_list:
                 r_text = self._clean_text(resume.get('resume_text', '') or "")
@@ -298,62 +281,53 @@ class MatchingService:
                     skills_str = str(skills)
                 combined_text = f"{r_text} \n Skills: {skills_str}"
                 resume_texts.append(combined_text)
-            
-            # Embed JD and resumes using safe encode (auto-reloads on httpx client closed)
+
             print(f"Embedding job description...")
             jd_vector = self._safe_encode(clean_jd)
-            
+
             print(f"Embedding {len(resume_texts)} resumes...")
             resume_vectors = self._safe_encode(resume_texts)
-            
-            # Calculate cosine similarity
+
             jd_vec_np = np.array([jd_vector])
-            
+
             if not isinstance(resume_vectors, np.ndarray):
                 resume_vectors = np.array(resume_vectors)
-                
+
             cosine_scores = cosine_similarity(jd_vec_np, resume_vectors)[0]
-            
-            # Build results
+
             results = []
             for idx, resume in enumerate(resume_data_list):
                 semantic_score = float(cosine_scores[idx])
-                
-                # Keyword Recall Score
+
                 keyword_score = self._calculate_keyword_score(clean_jd, resume_texts[idx])
-                
-                # Skill Match Score
+
                 resume_skills = resume.get('skills', [])
                 if isinstance(resume_skills, str):
                     resume_skills = [s.strip() for s in resume_skills.split(',') if s.strip()]
                 skill_score = self._calculate_skill_match_score(clean_jd, resume_skills)
-                
-                # Combined Score (0-1): 50% Semantic + 30% Skill Match + 20% Keyword Recall
+
                 final_score_norm = (semantic_score * 0.50) + (skill_score * 0.30) + (keyword_score * 0.20)
-                
-                # Convert to percentage (0-100)
+
                 score = final_score_norm * 100
-                
-                # Apply threshold
+
                 shortlisted = score >= threshold
-                
+
                 results.append({
                     'candidate_name': resume.get('name', 'Unknown'),
                     'email': resume.get('email', ''),
                     'phone': resume.get('phone', ''),
                     'skills': resume.get('skills', []),
-                    'score': round(score, 2),  # Round to 2 decimal places
+                    'score': round(score, 2),                             
                     'shortlisted': shortlisted,
                     'threshold': threshold,
-                    'resume_text': resume.get('resume_text', '')[:500]  # First 500 chars for summary
+                    'resume_text': resume.get('resume_text', '')[:500]                               
                 })
-            
-            # Sort by score descending
+
             results.sort(key=lambda x: x['score'], reverse=True)
-            
+
             print(f"✅ Scored {len(results)} resumes. Shortlisted: {sum(1 for r in results if r['shortlisted'])}")
             return results
-            
+
         except Exception as e:
             print(f"Error in score_new_resumes_for_job: {e}")
             import traceback

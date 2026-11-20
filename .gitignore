@@ -68,3 +68,6 @@ debug_output*.txt
 # Workflow exports with embedded credentials
 fix_webhook_nodes.json
 
+
+secrets/
+!frontend/vercel.json

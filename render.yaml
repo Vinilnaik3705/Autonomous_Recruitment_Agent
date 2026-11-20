@@ -1,0 +1,56 @@
+envVarGroups:
+  - name: recruitment-settings
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: GOOGLE_TOKEN_FILE
+        value: /etc/secrets/google-token.json
+databases:
+  - name: recruitment-postgres
+    databaseName: recruitment
+    postgresMajorVersion: "16"
+services:
+  - type: keyvalue
+    name: recruitment-redis
+    plan: starter
+    ipAllowList: []
+    maxmemoryPolicy: noeviction
+  - type: web
+    name: recruitment-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    preDeployCommand: alembic -c backend/alembic.ini upgrade head
+    dockerCommand: sh -c 'uvicorn backend.pipeline_api:app --host 0.0.0.0 --port "$PORT"'
+    envVars: &runtime
+      - fromGroup: recruitment-settings
+      - key: DATABASE_URL
+        fromDatabase: {name: recruitment-postgres, property: connectionString}
+      - key: REDIS_URL
+        fromService: {type: keyvalue, name: recruitment-redis, property: connectionString}
+  - type: worker
+    name: recruitment-heavy
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: celery -A backend.workers.pipeline:app worker -Q heavy --concurrency=1 -l INFO
+    envVars: *runtime
+  - type: worker
+    name: recruitment-light
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: celery -A backend.workers.pipeline:app worker -Q light --concurrency=2 -l INFO
+    envVars: *runtime
+  - type: worker
+    name: recruitment-beat
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: celery -A backend.workers.pipeline:app beat -s /tmp/beat -l INFO
+    envVars: *runtime

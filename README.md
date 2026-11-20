@@ -1,154 +1,50 @@
-# 🤖 Autonomous Recruitment Agent
+# Autonomous Recruitment Agent
 
-An AI-powered recruitment automation system that screens resumes, matches candidates, schedules interviews, and automates onboarding.
+This migration branch serves a single recruitment team's dashboard. Staff submit a PDF or DOCX, a job description, required skills and an invitation address. Candidates register, claim an emailed invitation and view their own stage and checklist. HR approves offers and rejections. A screening score informs human review.
 
----
+## Local deployment
 
-## ⚡ Quick Start (5 minutes setup)
+1. Install Docker Engine or Docker Desktop with Compose v2. Copy `.env.example` to `.env`. Set independent random hex values for `POSTGRES_PASSWORD` and `JWT_SECRET` (at least 32 bytes each). Leave `INTERNAL_API_KEY` empty unless a trusted service needs HR access.
+2. Set `GEMINI_API_KEY`, or set `LLM_PROVIDER=ollama` and point `OLLAMA_BASE_URL` at a server reachable by the heavy worker with `OLLAMA_MODEL` installed. MiniLM downloads its model on the first screening run. Allow outbound model downloads or provision the worker's Hugging Face cache in advance.
+3. In the Google Cloud project enable Calendar and Gmail, configure the OAuth consent screen and authorize the recruitment test mailbox with Calendar and Gmail send access. Save the authorized-user JSON with a refresh token as `secrets/google-token.json`. The client registration JSON alone cannot send mail. Set `GOOGLE_CALENDAR_ID` to the shared test calendar or `primary`. The authorized mailbox must have calendar write access. Use a dedicated test recipient for the first submission. Submitting queues an actual invitation.
+4. Run `docker compose up --build -d`. The migration service must exit successfully. Open <http://localhost:3000> and check <http://localhost:8000/health>. Use `docker compose logs migrate api heavy light beat` for diagnostics.
+5. Register the first account through the dashboard. An administrator must verify the account and promote it using `docker compose exec postgres psql -U recruitment -d recruitment`. Use the query below with the registered address, confirm the one returned row and sign in. Public registration grants candidate access only.
 
-### **STEP 1: Install Docker Desktop**
-
-- Download from: https://www.docker.com/products/docker-desktop
-- Install and **start Docker Desktop** (wait 30-60 seconds)
-- ✅ Verify: Open PowerShell and run `docker ps`
-
-### **STEP 2: Clone & Setup**
-
-```powershell
-git clone <your-repo-url>
-cd automated_res
+```sql
+UPDATE users SET role = 'hr' WHERE email = 'your-verified-address@example.org'
+RETURNING id, email, role;
 ```
 
-### **STEP 3: Configure API Keys**
+## Workflow
 
-```powershell
-Copy-Item .env.example .env
+The Vite dashboard calls FastAPI (`backend.pipeline_api:app`). PostgreSQL owns the run, pending work, approval and delivery state. Celery Beat republishes due work to Redis every 15 seconds. The heavy worker locks the run, invokes the parse/extract/embed LangGraph, compares the resume to the job with MiniLM, stores its vector and releases the uploaded bytes after success. Failed screening retains the document for retry. Staff see extracted fields, score components, stages and delivery state. This deployment assumes one HR team. Staff can view that team's applications.
+
+The light worker sends invitations, interviews, reminders, approved offers and onboarding checklists. Calendar booking uses a stable event ID and rescheduling updates that event. A candidate must possess both the invitation code and an account with the addressed email. Candidates see stages and checklists after linking. Gmail sends cannot guarantee exactly-once delivery after a lost response. The worker records ambiguous sends as `uncertain`; inspect the sender's Sent folder or calendar before reconciliation. An outstanding calendar or offer action blocks the next stage until reconciled. Keep one Beat instance.
+
+The dashboard polls every 15 seconds and displays the latest 100 staff runs. Reviewers can shortlist, schedule or reschedule, record interview feedback and advance a candidate. Enter the actual offer terms before confirming an offer. HR records acceptance before beginning onboarding and records checklist verification before completion. This version does not collect a candidate e-signature.
+
+## Hosted deployment
+
+Use the root `render.yaml` Blueprint for managed PostgreSQL, Redis-compatible storage, the API, two workers and Beat. Provision enough RAM for the heavy worker to load CPU PyTorch and MiniLM. The API pre-deploy command runs Alembic. Place the authorized-user JSON in a Render secret file named `google-token.json` on the API and light worker. Configure the exact frontend origin in `CORS_ORIGINS`. Review the paid service choices before provisioning.
+
+Import the repository in Vercel with root directory `frontend`, Vite, Node 22, install command `npm ci`, build command `npm run build` and output directory `dist`. Set `VITE_API_BASE_URL` to the public HTTPS API origin before building. API secrets belong exclusively on the backend. Verify the API health route, sign in and use an anonymized resume and designated test mailbox for the hosted smoke test.
+
+## Existing databases and rollback
+
+The Compose project creates its own database volume. Before connecting an existing installation, create a backup using `pg_dump -Fc`, restore it into a separate PostgreSQL 16 instance with pgvector, and run `alembic -c backend/alembic.ini upgrade head` against the restored copy. Compare existing row counts and check an existing login. The new runs table starts empty. Historical n8n applications are not imported into the new stage history. Retain the existing deployment and database until acceptance. An Alembic downgrade deletes migration tables and their data.
+
+## Verification
+
+From the repository root, install `backend/requirements.txt`, pytest, httpx and pytest-cov using Python 3.11. Set `JWT_SECRET`, `INTERNAL_API_KEY`, `DATABASE_URL` and `REDIS_URL` to test-only values. Use a disposable database for the integration suite.
+
+```sh
+alembic -c backend/alembic.ini upgrade head
+PIPELINE_INTEGRATION=1 python -m pytest
+cd frontend
+npm ci
+npm run lint
+npm test
+npm run build
 ```
 
-Open `.env` in VS Code and add:
-
-- `OPENAI_API_KEY` = Your OpenAI key from https://platform.openai.com/api-keys
-- `NEXT_PUBLIC_FIREBASE_API_KEY`, `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN`, `NEXT_PUBLIC_FIREBASE_PROJECT_ID`, `NEXT_PUBLIC_FIREBASE_APP_ID`
-- `FIREBASE_SERVICE_ACCOUNT_JSON` or `FIREBASE_SERVICE_ACCOUNT_PATH`
-- `ALLOWED_AUTH_EMAILS` = comma-separated list of emails allowed to sign in
-
-Everything else is pre-configured!
-
-### **STEP 4: Start Everything**
-
-```powershell
-docker compose up -d --build
-```
-
-Wait 30-60 seconds for services to start...
-
-### **STEP 5: Setup n8n Workflows (Private Repo)**
-
-**Note:** n8n workflows contain proprietary business logic and are stored in a **private repository** for security.
-
-1. Clone the private workflows repo (authorized team members only)
-2. Copy workflow JSON files to n8n container or import via n8n UI
-3. Workflows will use credentials from your `.env` file
-
-### **STEP 6: Open in Browser**
-
-- **Dashboard**: http://localhost:3000 (Frontend)
-- **API Docs**: http://localhost:8000/docs (Backend)
-- **Workflows**: http://localhost:5678 (n8n)
-
----
-
-## 🛑 Troubleshooting
-
-**Docker not found?**
-
-```powershell
-# Restart computer or manually start Docker Desktop
-docker ps  # Should show "CONTAINER ID" header
-```
-
-**Port 8000 or 5678 already in use?**
-
-```powershell
-# Stop other services and try again
-docker compose down
-docker compose up -d --build
-```
-
-**Getting connection errors?**
-
-```powershell
-# Check logs
-docker compose logs -f postgres    # Check database
-docker compose logs -f fastapi     # Check backend
-docker compose logs -f n8n         # Check workflow engine
-```
-
----
-
-## 📁 Project Structure
-
-```
-automated_res/
-├── backend/              # FastAPI server
-├── frontend/             # React web dashboard
-├── workflows/            # n8n workflow exports (JSON)
-├── docker-compose.yml    # Container setup
-├── .env.example          # Template for configuration
-└── .env                  # Your API keys (do NOT commit)
-```
-
----
-
-## 🚀 What You Get
-
-✅ Resume screening with AI  
-✅ Candidate ranking & matching  
-✅ Automated email invitations  
-✅ Interview scheduling system  
-✅ Onboarding workflows  
-✅ Role-based access control (RBAC)
-
----
-
-## 📚 Learn More
-
-- **n8n Workflows**: Located in the [workflows/](file:///c:/Users/VINIL NAIK/OneDrive/Desktop/Projects/automated_res/workflows) directory.
-
----
-
-## 🔑 Environment Variables
-
-**Required:**
-
-- `OPENAI_API_KEY` - For resume analysis & candidate matching
-- Firebase web config keys for frontend auth
-- Firebase service account JSON/path for backend token verification
-- `ALLOWED_AUTH_EMAILS` - only these email addresses can access the app
-
-**Optional** (pre-configured):
-
-- Database: PostgreSQL (localhost:5433)
-- Backend: FastAPI (localhost:8000)
-- n8n: Workflow engine (localhost:5678)
-- Frontend: React app (localhost:3000)
-
----
-
-## 🛑 Stop Everything
-
-```powershell
-docker compose down
-```
-
-To clean up everything (including database):
-
-```powershell
-docker compose down -v
-```
-
----
-
-## ❓ Need Help?
-
-Use Docker logs and FastAPI docs for troubleshooting and API validation.
+The integration test exercises real JWT issuance, PostgreSQL, pgvector, LangGraph, duplicate submission, repeated task delivery, role checks, rescheduling, feedback, offer approval and onboarding. It substitutes model outputs and Google calls. Live signoff also requires matching Calendar event IDs after rescheduling, one received message per intended action and worker processing through Redis. Archived source for the legacy stack remains in the branch for comparison. The migrated deployment uses the entry points above.

@@ -2,10 +2,12 @@
 Auth router - handles user authentication, registration, and token management.
 """
 from fastapi import APIRouter, HTTPException, status, Depends
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
 from datetime import timedelta
 import hashlib
+import hmac
+import secrets
 import re
 import requests
 from psycopg2.extras import RealDictCursor
@@ -19,9 +21,9 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 class UserRegister(BaseModel):
     username: str
-    email: str
-    password: str
-    role: Optional[str] = "recruiter"                
+    email: EmailStr
+    password: str = Field(min_length=12, max_length=512)
+    role: Optional[str] = "student"
 
 class UserLogin(BaseModel):
     email: str
@@ -30,7 +32,7 @@ class UserLogin(BaseModel):
 class SocialAuthRequest(BaseModel):
     credential: str
     provider: str
-    role: Optional[str] = "recruiter"
+    role: Optional[str] = "student"
     mode: Optional[str] = "login"
 
 class TokenResponse(BaseModel):
@@ -52,8 +54,9 @@ class ProfileUpdate(BaseModel):
     bio: Optional[str] = None
 
 def hash_password(password: str) -> str:
-    """Hash password using SHA256."""
-    return hashlib.sha256(password.encode()).hexdigest()
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1)
+    return f"scrypt:{salt.hex()}:{digest.hex()}"
 
 def ensure_users_table(conn) -> None:
     """Ensure the users table and required columns exist."""
@@ -83,11 +86,16 @@ def ensure_users_table(conn) -> None:
         cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMP")
         cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
         cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS organization_id VARCHAR(100)")
     conn.commit()
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify password against hash."""
-    return hash_password(plain_password) == hashed_password
+    if hashed_password.startswith("scrypt:"):
+        _, salt, expected = hashed_password.split(":")
+        digest = hashlib.scrypt(plain_password.encode(), salt=bytes.fromhex(salt), n=16384, r=8, p=1)
+        return hmac.compare_digest(digest.hex(), expected)
+    return hmac.compare_digest(hashlib.sha256(plain_password.encode()).hexdigest(), hashed_password)
 
 def _sanitize_username(seed: str) -> str:
     raw = (seed or "user").strip().lower()
@@ -125,7 +133,7 @@ def _fetch_google_profile(access_token: str) -> dict:
         )
 
     profile = response.json()
-    if not profile.get("email"):
+    if not profile.get("email") or profile.get("email_verified") is not True:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Google account email is unavailable",
@@ -166,7 +174,7 @@ async def register(user_data: UserRegister):
                     detail="User already exists"
                 )
 
-            valid_roles = ["hr", "recruiter", "student"]
+            valid_roles = ["student"]
             if user_data.role not in valid_roles:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -278,13 +286,15 @@ async def social_auth(payload: SocialAuthRequest):
                         detail="Account already exists. Please sign in instead",
                     )
 
-                valid_roles = ["hr", "recruiter", "student"]
-                requested_role = payload.role if payload.role in valid_roles else "recruiter"
+                valid_roles = ["student"]
+                if payload.role not in valid_roles:
+                    raise HTTPException(403, "Staff access requires administrator provisioning")
+                requested_role = "student"
 
                 preferred_username = _sanitize_username(email.split("@")[0] or display_name)
                 username = _build_unique_username(cur, preferred_username)
 
-                synthetic_password_hash = hash_password(f"social::{provider}::{email}")
+                synthetic_password_hash = "oauth_only"
 
                 cur.execute(
                     """
@@ -370,7 +380,8 @@ async def login(credentials: UserLogin):
                     detail="No account found for this email. Please sign up first"
                 )
 
-            if not verify_password(credentials.password, user["password_hash"]):
+            if (user["password_hash"] == hashlib.sha256(f"social::google::{user['email']}".encode()).hexdigest()
+                    or not verify_password(credentials.password, user["password_hash"])):
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid password"

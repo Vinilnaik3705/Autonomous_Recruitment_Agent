@@ -11,7 +11,7 @@ from backend.security.dependencies import (
 )
 import os
 import jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
 ACCESS_TOKEN_EXPIRE_HOURS = 24
@@ -25,15 +25,15 @@ def create_access_token(
     """Legacy token creator for compatibility."""
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
+        expire = datetime.now(timezone.utc) + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
 
     to_encode.update({
         "sub": str(user_id),
         "role": role,
         "exp": expire,
-        "iat": datetime.utcnow()
+        "iat": datetime.now(timezone.utc)
     })
     return jwt.encode(to_encode, JWT_SECRET, algorithm=ALGORITHM)
 

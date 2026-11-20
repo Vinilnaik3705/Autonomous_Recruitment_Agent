@@ -27,7 +27,7 @@ def save_embedding(
     statement = (
         insert(ResumeEmbedding)
         .values(resume_id=resume_id, model_name=model_name, embedding=embedding)
-        .on_conflict_do_nothing(constraint="screening_resume_embeddings_resume_id_model_name_key")
+        .on_conflict_do_nothing(index_elements=["resume_id", "model_name"])
     )
     session.execute(statement)
     record = session.scalar(

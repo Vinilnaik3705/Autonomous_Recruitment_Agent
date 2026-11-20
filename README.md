@@ -25,7 +25,7 @@ The dashboard polls every 15 seconds and displays the latest 100 staff runs. Rev
 
 ## Hosted deployment
 
-Use the root `render.yaml` Blueprint for managed PostgreSQL, Redis-compatible storage, the API, two workers and Beat. Provision enough RAM for the heavy worker to load CPU PyTorch and MiniLM. The API pre-deploy command runs Alembic. Place the authorized-user JSON in a Render secret file named `google-token.json` on the API and light worker. Configure the exact frontend origin in `CORS_ORIGINS`. Review the paid service choices before provisioning.
+Use the root `render.yaml` Blueprint for managed PostgreSQL, Redis-compatible storage, the API, two workers and Beat. Provision enough RAM for the heavy worker to load CPU PyTorch and MiniLM. The API pre-deploy command runs Alembic. Place the authorized-user JSON in a Render secret file named `google-token.json` on the API and light worker. In the Render dashboard, add the exact frontend origin as `CORS_ORIGINS` and the provider secret as `GEMINI_API_KEY` to the recruitment-settings environment group, then redeploy its services. Review the paid service choices before provisioning.
 
 Import the repository in Vercel with root directory `frontend`, Vite, Node 22, install command `npm ci`, build command `npm run build` and output directory `dist`. Set `VITE_API_BASE_URL` to the public HTTPS API origin before building. API secrets belong exclusively on the backend. Verify the API health route, sign in and use an anonymized resume and designated test mailbox for the hosted smoke test.
 

@@ -833,7 +833,7 @@ GET /jobs/list?limit=20&offset=40
 ```bash
 # Upload resume
 curl -X POST http://localhost:8000/resume/analyze \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer ${ACCESS_TOKEN}" \
   -F "file=@resume.pdf" \
   -F "user_id=1"
 

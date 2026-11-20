@@ -3,10 +3,6 @@ envVarGroups:
     envVars:
       - key: JWT_SECRET
         generateValue: true
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: CORS_ORIGINS
-        sync: false
       - key: GOOGLE_TOKEN_FILE
         value: /etc/secrets/google-token.json
 databases:
@@ -21,6 +17,7 @@ services:
     maxmemoryPolicy: noeviction
   - type: web
     name: recruitment-api
+    plan: starter
     runtime: docker
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
@@ -35,6 +32,7 @@ services:
         fromService: {type: keyvalue, name: recruitment-redis, property: connectionString}
   - type: worker
     name: recruitment-heavy
+    plan: standard
     runtime: docker
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend

@@ -14,7 +14,7 @@ PHONE_RE = re.compile(
     r"|\b\+91[-.\s]?\d{5}[-.\s]?\d{5}\b"
     r"|\b0\d{5}[-.\s]?\d{5}\b"
     r"|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b"
-    r"|\b\(\d{3}\)[-.\s]?\d{3}[-.\s]?\d{4}\b"
+    r"|(?<!\w)\(\d{3}\)[-.\s]?\d{3}[-.\s]?\d{4}\b"
     r"|\b\d{10}\b"
     r"|\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b"
     r"|\b\d{5}[-.\s]\d{5}\b"
@@ -152,9 +152,7 @@ def extract_email(text: str) -> Optional[str]:
 
     matches = EMAIL_RE.findall(text)
     if matches:
-        for email in matches:
-            if not any(stop in email.lower() for stop in ["example.com", "test.com", "placeholder"]):
-                return email
+        return matches[0]
     return None
 
 def extract_skills(text: str) -> List[str]:

@@ -112,14 +112,22 @@ function Run({ run, role, act }) {
     </article>
   );
 }
-function App() {
-  const [token, setToken] = useState(sessionStorage.getItem("token") || "");
+function App({auth}) {
+  const [token, setToken] = useState(auth ? "" : sessionStorage.getItem("token") || "");
   const [user, setUser] = useState(null),
     [runs, setRuns] = useState([]),
     [error, setError] = useState(""),
     [signup, setSignup] = useState(false);
   const [revision, setRevision] = useState(0),
     [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!auth) return;
+    const {data} = auth.onAuthStateChange((_event, session) => {
+      setToken(session?.access_token || "");
+      if (!session) { setUser(null); setRuns([]); }
+    });
+    return () => data.subscription.unsubscribe();
+  }, [auth]);
   async function request(path, options = {}) {
     const res = await fetch(base + path, {
       ...options,
@@ -181,7 +189,8 @@ function App() {
       body: JSON.stringify(data),
     });
   }
-  function logout() {
+  async function logout() {
+    if (auth) { const result = await auth.signOut(); if (result.error) { setError(result.error.message); return; } }
     sessionStorage.removeItem("token");
     setToken("");
     setUser(null);
@@ -202,17 +211,24 @@ function App() {
               e.preventDefault();
               const data = Object.fromEntries(new FormData(e.currentTarget));
               execute(async () => {
-                const auth = await post(
+                if (auth) {
+                  const credentials = {email: data.email, password: data.password};
+                  const result = signup ? await auth.signUp(credentials) : await auth.signInWithPassword(credentials);
+                  if (result.error) throw result.error;
+                  if (!result.data.session) setError("Check your email to confirm your account, then sign in.");
+                  return;
+                }
+                const local = await post(
                   signup ? "/auth/register" : "/auth/login",
                   data,
                 );
-                sessionStorage.setItem("token", auth.access_token);
-                setToken(auth.access_token);
+                sessionStorage.setItem("token", local.access_token);
+                setToken(local.access_token);
               });
             }}
           >
             <h2>{signup ? "Candidate registration" : "Sign in"}</h2>
-            {signup && (
+            {signup && !auth && (
               <label>
                 Name
                 <input name="username" required />
@@ -321,4 +337,16 @@ function App() {
     </>
   );
 }
-createRoot(document.getElementById("root")).render(<App />);
+const root = createRoot(document.getElementById("root"));
+async function boot() {
+  const response = await fetch(base + "/auth/config");
+  if (!response.ok) throw Error("Authentication configuration is unavailable");
+  const config = await response.json();
+  let auth = null;
+  if (config.provider === "supabase") {
+    const { createClient } = await import("@supabase/supabase-js");
+    auth = createClient(config.url, config.key).auth;
+  }
+  root.render(<App auth={auth} />);
+}
+boot().catch(() => root.render(<p role="alert">Unable to connect to the recruitment API. Refresh to retry.</p>));

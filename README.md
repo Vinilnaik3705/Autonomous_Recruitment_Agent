@@ -59,3 +59,9 @@ Mount the authorized-user token, set `GOOGLE_TEST_RECIPIENT` to an approved test
 - [Demo presentation (PowerPoint)](project-doc/demo/recruitment-demo.pptx)
 - [Verification record and demo script](project-doc/docs/status.md)
 - [Report and presentation source](project-doc/demo/)
+
+### Supabase Auth
+
+The recruitment project is `zdulkgoojhctxgfqsyla` in Mumbai. Set `SUPABASE_URL=https://zdulkgoojhctxgfqsyla.supabase.co` and its `SUPABASE_PUBLISHABLE_KEY` on the API to use hosted sign-in. Use the dashboard publishable key beginning with `sb_publishable_`. Set the Auth Site URL and allowed redirects to the deployed frontend origin and enable email confirmation. The frontend reads public configuration from the API. With hosted Auth enabled the local password endpoints are disabled. Offline development can use the local provider by leaving both settings unset.
+
+FastAPI verifies the session with the project's Auth server. New confirmed identities receive candidate access (internal role `student`). HR and recruiter assignments remain in the recruitment PostgreSQL database. For an existing account, verify the owner in Supabase Auth and the local account ID, then explicitly insert their project URL, verified Supabase UUID and local user ID into `recruitment_identities(issuer,subject,user_id)`. Never grant a staff role from signup metadata. Gmail and Calendar still use their separate OAuth consent.

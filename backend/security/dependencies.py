@@ -91,6 +91,22 @@ async def get_current_user(
             detail="Authorization header or X-API-Key is missing"
         )
 
+    url = os.getenv("SUPABASE_URL", "").rstrip("/")
+    if url:
+        from backend.security.supabase_auth import resolve_account, verified_identity
+        subject, email = await verified_identity(credentials.credentials, url, os.environ["SUPABASE_PUBLISHABLE_KEY"])
+        _ensure_email_allowed(email)
+        conn = get_db_connection()
+        try:
+            user = resolve_account(conn, url, subject, email)
+        finally:
+            conn.close()
+        if not user["is_active"]:
+            raise HTTPException(403, "User account is deactivated")
+        return {"user_id": user["id"], "username": user["username"], "email": email,
+                "role": user["role"], "organization_id": user["organization_id"],
+                "payload": {"sub": subject, "email": email}}
+
     if not JWT_SECRET:
         raise HTTPException(503, "Authentication is not configured")
     try:

@@ -1,5 +1,6 @@
 """Single-team recruitment API. Run migrations before starting this service."""
 
+import os
 import secrets
 import hashlib
 from datetime import datetime, timedelta, timezone
@@ -25,7 +26,22 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
 )
-app.include_router(auth_router)
+supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+if supabase_url:
+    from backend.api.auth_router import get_current_user_info
+    if not os.getenv("SUPABASE_PUBLISHABLE_KEY", "").startswith("sb_publishable_"):
+        raise RuntimeError("Set a Supabase publishable key for hosted authentication")
+    app.get("/auth/me")(get_current_user_info)
+else:
+    app.include_router(auth_router)
+
+
+@app.get("/auth/config")
+def auth_config():
+    if supabase_url:
+        return {"provider":"supabase","url":supabase_url,"key":os.environ["SUPABASE_PUBLISHABLE_KEY"]}
+    return {"provider":"local"}
+
 Staff = Annotated[dict, Depends(require_role("recruiter", "hr"))]
 User = Annotated[dict, Depends(get_current_user)]
 

@@ -39,7 +39,7 @@ def _run_sql_migrations(cur):
         except Exception as migration_error:
 
             cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
-            print(f"Skipping migration {migration_name}: {migration_error}")
+            raise RuntimeError(f"Migration failed: {migration_name}") from migration_error
         finally:
             cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
 
@@ -355,8 +355,8 @@ def init_db():
             """)
 
             cur.execute("""
-                INSERT INTO interviewers (id, name, email, timezone, is_active)
-                VALUES (1, 'HR Team', 'workspace3705@gmail.com', 'Asia/Kolkata', TRUE)
+                INSERT INTO interviewers (name, email, timezone, is_active)
+                VALUES ( 'HR Team', 'workspace3705@gmail.com', 'Asia/Kolkata', TRUE)
                 ON CONFLICT (email) DO NOTHING
             """)
 
@@ -383,6 +383,15 @@ def init_db():
                         (username, email, pwd_hash, role)
                     )
 
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id SERIAL PRIMARY KEY,
+                    type VARCHAR(30) NOT NULL DEFAULT 'info',
+                    title TEXT NOT NULL, message TEXT NOT NULL,
+                    is_read BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             _run_sql_migrations(cur)
             _apply_schema_hotfixes(cur)
 
@@ -393,6 +402,7 @@ def init_db():
     except Exception as e:
         print(f"Error initializing database: {e}")
         conn.rollback()
+        raise
     finally:
         conn.close()
 

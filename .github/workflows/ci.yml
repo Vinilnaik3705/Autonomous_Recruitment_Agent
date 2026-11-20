@@ -201,6 +201,13 @@ jobs:
         curl --fail --retry 30 --retry-all-errors --retry-delay 2 http://localhost:3000/api/health
         curl --fail http://localhost:3000/ | grep 'Recruitment workspace'
         docker compose exec -T heavy celery -A backend.workers.pipeline:app inspect ping --timeout 10
+    - name: Verify candidate registration, HR sign-in and resume upload in Chrome
+      env:
+        COMPOSE_SMOKE_TEST: '1'
+      run: |
+        python -m venv "$RUNNER_TEMP/recruitment-browser"
+        "$RUNNER_TEMP/recruitment-browser/bin/pip" install playwright python-docx
+        "$RUNNER_TEMP/recruitment-browser/bin/python" scripts/browser_smoke.py
     - name: Compose diagnostics
       if: failure()
       run: docker compose logs --tail=80

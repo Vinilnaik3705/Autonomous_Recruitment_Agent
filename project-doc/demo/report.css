@@ -1,0 +1,7 @@
+@page {size:A4;margin:18mm 17mm;@bottom-center{content:counter(page);font-size:9pt}}
+html{font:10.5pt/1.34 "Liberation Serif",serif;color:#111}
+h1{font-size:19pt;line-height:1.12;text-align:center}
+h2{font-size:13pt;margin:1em 0 .3em;break-after:avoid}
+p{margin:.45em 0}tr{break-inside:avoid}table{border-collapse:collapse;width:100%}
+td,th{padding:4pt;border-bottom:1px solid #aaa;text-align:left;vertical-align:top}
+code{font-size:8.5pt;overflow-wrap:anywhere}

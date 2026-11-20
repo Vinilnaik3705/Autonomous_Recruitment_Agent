@@ -1,4 +1,5 @@
 """Durable candidate workflow and outbound action log."""
+
 from alembic import op
 
 revision = "20261120_02"

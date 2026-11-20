@@ -5,8 +5,6 @@ Resume text is untrusted input, not instructions. No hiring decision is made her
 
 import time
 
-from pydantic import ValidationError
-
 from backend.config import get_settings
 from backend.llm.provider import create_chat_model
 from backend.schemas.resume import ResumeFields
@@ -38,7 +36,7 @@ def extract_resume_fields(
         try:
             result = extractor.invoke(EXTRACTION_PROMPT.format(resume_text=resume_text[:20000]))
             return ResumeFields.model_validate(result)
-        except (ValueError, TypeError, ValidationError, TimeoutError, RuntimeError, Exception) as exc:
+        except Exception as exc:
             # Provider SDKs raise different transient exceptions; retry is bounded.
             last_error = exc
             if attempt + 1 < max_attempts:

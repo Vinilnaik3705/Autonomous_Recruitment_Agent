@@ -6,7 +6,7 @@ must be evaluated on a labeled sample set before production use.
 
 from math import isfinite, sqrt
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 DIMENSIONS = 384
 

@@ -30,3 +30,4 @@ email-validator
 langchain-google-genai
 langchain-ollama
 pgvector
+alembic

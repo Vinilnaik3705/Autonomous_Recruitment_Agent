@@ -152,9 +152,7 @@ def extract_email(text: str) -> Optional[str]:
 
     matches = EMAIL_RE.findall(text)
     if matches:
-        for email in matches:
-            if not any(stop in email.lower() for stop in ["example.com", "test.com", "placeholder"]):
-                return email
+        return matches[0]
     return None
 
 def extract_skills(text: str) -> List[str]:

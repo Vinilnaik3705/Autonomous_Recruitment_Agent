@@ -27,3 +27,5 @@ firebase-admin
 # Phase 2 incremental migration dependencies
 pdfplumber
 email-validator
+langchain-google-genai
+langchain-ollama

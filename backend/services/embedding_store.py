@@ -1,12 +1,9 @@
-"""Transactional persistence for one embedding per resume and model.
-
-This module does not re-encode existing resumes; the caller supplies the
-already-computed vector. Call from a worker after parsing and extraction.
-"""
+"""Idempotent pgvector storage; concurrency-safe for duplicate worker retries."""
 
 from math import isfinite
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from backend.embeddings.provider import DIMENSIONS, MODEL_NAME
@@ -27,18 +24,18 @@ def save_embedding(
     if model_name != MODEL_NAME:
         raise ValueError("This database is configured for the MiniLM embedding model")
 
-    existing = session.scalar(
+    statement = (
+        insert(ResumeEmbedding)
+        .values(resume_id=resume_id, model_name=model_name, embedding=embedding)
+        .on_conflict_do_nothing(constraint="screening_resume_embeddings_resume_id_model_name_key")
+    )
+    session.execute(statement)
+    record = session.scalar(
         select(ResumeEmbedding).where(
             ResumeEmbedding.resume_id == resume_id,
             ResumeEmbedding.model_name == model_name,
         )
     )
-    if existing is not None:
-        return existing
-
-    record = ResumeEmbedding(
-        resume_id=resume_id, model_name=model_name, embedding=embedding
-    )
-    session.add(record)
-    session.flush()
+    if record is None:
+        raise RuntimeError("Embedding could not be retrieved after insert")
     return record

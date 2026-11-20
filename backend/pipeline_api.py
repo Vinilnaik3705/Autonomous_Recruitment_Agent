@@ -1,317 +1,343 @@
-"""Single-team recruitment API. Run migrations before starting this service."""
+"""Recruitment application and workflow endpoints."""
 
-import os
-import secrets
 import hashlib
+import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Annotated
-from uuid import UUID
+from pathlib import Path
 
-from fastapi import Depends, FastAPI, Form, Header, HTTPException, UploadFile
+from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from psycopg2.extras import Json
-from pydantic import AwareDatetime, BaseModel, EmailStr, Field
+from psycopg.types.json import Jsonb
+from pydantic import AwareDatetime, EmailStr
 
-from backend.api.auth_router import router as auth_router
+from backend.api.auth_router import router
 from backend.config import get_settings
+from backend.database import make_pool
+from backend.db.queries import (
+    applications,
+    interviews,
+    jobs,
+    onboarding,
+    resumes,
+    runs,
+    users,
+)
+from backend.embeddings.provider import LocalMiniLM
 from backend.orchestration.status import CandidateStatus, validate_transition
-from backend.security.dependencies import get_current_user, require_role
+from backend.schemas.recruitment import (
+    ApplicationReceipt,
+    InterviewFeedback,
+    JobInput,
+    Reconciliation,
+    StageChange,
+)
+from backend.security.dependencies import Connection, Staff, User
 from backend.services.google_workspace import availability, reschedule_conflict
-from backend.workers.pipeline import record_delivery, transaction
+from backend.workers.pipeline import record_delivery
 
-app = FastAPI(title="Autonomous Recruitment Agent")
+
+@asynccontextmanager
+async def lifespan(app):
+    with make_pool() as pool:
+        pool.wait(timeout=10)
+        app.state.db_pool = pool
+        yield
+
+
+app = FastAPI(title="Autonomous Recruitment Agent", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().allowed_origins,
     allow_methods=["GET", "POST", "PATCH"],
-    allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
+    allow_headers=["Authorization", "Content-Type"],
 )
-supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
-if supabase_url:
-    from backend.api.auth_router import get_current_user_info
-    if not os.getenv("SUPABASE_PUBLISHABLE_KEY", "").startswith("sb_publishable_"):
-        raise RuntimeError("Set a Supabase publishable key for hosted authentication")
-    app.get("/auth/me")(get_current_user_info)
-else:
-    app.include_router(auth_router)
-
-
-@app.get("/auth/config")
-def auth_config():
-    if supabase_url:
-        return {"provider":"supabase","url":supabase_url,"key":os.environ["SUPABASE_PUBLISHABLE_KEY"]}
-    return {"provider":"local"}
-
-Staff = Annotated[dict, Depends(require_role("recruiter", "hr"))]
-User = Annotated[dict, Depends(get_current_user)]
+app.include_router(router)
 
 
 @app.get("/health")
-def health():
-    with transaction() as cur:
-        cur.execute("SELECT 1 FROM agent_runs LIMIT 1")
+def health(conn: Connection):
+    conn.execute("SELECT 1")
     return {"status": "ready"}
 
 
-@app.post("/runs", status_code=202)
-async def submit(
-    user: Staff,
+@app.post("/jobs", status_code=201)
+def create_job(body: JobInput, conn: Connection, user: Staff):
+    return jobs.create(conn, body, user["id"], LocalMiniLM().encode(body.description))
+
+
+@app.get("/jobs")
+def open_jobs(conn: Connection, _user: User):
+    return jobs.list_open(conn)
+
+
+@app.get("/jobs/{job_id}/matches")
+def matching(job_id: int, conn: Connection, _user: Staff, limit: int = 10):
+    if not 1 <= limit <= 100:
+        raise HTTPException(422, "Limit must be between 1 and 100")
+    job = jobs.embedding_for(conn, job_id)
+    if not job or job["embedding"] is None:
+        raise HTTPException(404, "Job embedding unavailable")
+    return applications.similar(conn, job_id, job["embedding"], limit)
+
+
+@app.post("/applications", status_code=202, response_model=ApplicationReceipt)
+def submit(
+    conn: Connection,
+    user: User,
     file: UploadFile,
-    email: Annotated[EmailStr, Form()],
-    job_description: Annotated[str, Form(min_length=1, max_length=20000)],
-    request_key: Annotated[UUID, Header(alias="Idempotency-Key")],
-    required_skills: Annotated[str, Form(max_length=4000)] = "",
+    job_id: int = Form(),
+    full_name: str = Form(min_length=1, max_length=200),
+    email: EmailStr | None = Form(None),
 ):
-    name = file.filename or ""
-    if not name.lower().endswith((".pdf", ".docx")):
+    if user["role"] not in {"candidate", "hr", "admin"}:
+        raise HTTPException(403, "Candidate or HR access required")
+    candidate_id = user["id"] if user["role"] == "candidate" else None
+    address = user["email"] if candidate_id else str(email or "").lower()
+    if not address:
+        raise HTTPException(422, "Candidate email required")
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in {".pdf", ".docx"}:
         raise HTTPException(415, "Upload a PDF or DOCX")
-    data = await file.read(8 * 1024 * 1024 + 1)
+    data = file.file.read(8 * 1024 * 1024 + 1)
     if not data or len(data) > 8 * 1024 * 1024:
         raise HTTPException(413, "Upload a nonempty file of at most 8 MiB")
-    code = secrets.token_urlsafe(32)
-    with transaction() as cur:
-        cur.execute(
-            """INSERT INTO agent_runs(owner_id,request_key,email,filename,document,job_description,required_skills,claim_hash)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(owner_id,request_key) DO NOTHING RETURNING id""",
-            (
-                user["user_id"],
-                str(request_key),
-                email,
-                name,
-                data,
-                job_description,
-                [s.strip() for s in required_skills.split(",") if s.strip()],
-                hashlib.sha256(code.encode()).hexdigest(),
-            ),
+    resume_path = resumes.store(conn, data, suffix)
+    row = applications.create(
+        conn, job_id, full_name.strip(), address, candidate_id, resume_path
+    )
+    if not row:
+        raise HTTPException(409, "Job is closed or this candidate already applied")
+    runs.enqueue(conn, row["id"], "screen", f"screen:{row['id']}")
+    if candidate_id is None:
+        code = secrets.token_urlsafe(32)
+        runs.enqueue(
+            conn,
+            row["id"],
+            "invite",
+            f"invite:{row['id']}",
+            {
+                "claim_hash": hashlib.sha256(code.encode()).hexdigest(),
+                "subject": "Track your application",
+                "text": f"Application ID: {row['id']}\nInvitation code: {code}",
+            },
         )
-        row = cur.fetchone()
-        if row:
-            cur.execute(
-                "INSERT INTO recruitment_actions(run_id,kind,body) VALUES (%s,'invitation',%s)",
-                (
-                    row["id"],
-                    Json(
-                        {
-                            "subject": "Track your application",
-                            "text": f"Sign in to the candidate portal with this email and enter your invitation code: {code}",
-                        }
-                    ),
-                ),
-            )
-        else:
-            cur.execute(
-                "SELECT id FROM agent_runs WHERE owner_id=%s AND request_key=%s",
-                (user["user_id"], str(request_key)),
-            )
-            row = cur.fetchone()
-        return row
+    return row
 
 
-@app.get("/runs")
-def list_runs(user: Staff):
-    with transaction() as cur:
-        cur.execute(
-            """SELECT r.id,email,filename,stage,screening_state,result,interview_at,feedback,checklist,
-                       (SELECT json_agg(json_build_object('id',id,'kind',kind,'state',state) ORDER BY id)
-                        FROM recruitment_actions WHERE run_id=r.id) AS actions
-                       FROM agent_runs r ORDER BY id DESC LIMIT 100"""
-        )
-        return cur.fetchall()
+@app.get("/applications")
+def list_applications(conn: Connection, user: User):
+    if user["role"] == "interviewer":
+        raise HTTPException(403, "Use the assigned interview workflow")
+    return applications.list_for(
+        conn, user["id"] if user["role"] == "candidate" else None
+    )
 
 
-@app.post("/runs/{run_id}/retry")
-def retry(run_id: int, user: Staff):
-    with transaction() as cur:
-        cur.execute(
-            "UPDATE agent_runs SET screening_state='queued' WHERE id=%s AND screening_state='failed' RETURNING id",
-            (run_id,),
-        )
-        if not cur.fetchone():
-            raise HTTPException(409, "Only failed screening runs can be retried")
+@app.post("/applications/{application_id}/claim")
+def claim(
+    application_id: int,
+    conn: Connection,
+    user: User,
+    code: str = Form(min_length=32, max_length=100),
+):
+    if not applications.claim(
+        conn, application_id, user, hashlib.sha256(code.encode()).hexdigest()
+    ):
+        raise HTTPException(404, "Invalid invitation")
+    return {"status": "linked"}
+
+
+@app.post("/applications/{application_id}/retry")
+def retry(application_id: int, conn: Connection, _user: Staff):
+    if not runs.retry_screening(conn, application_id):
+        raise HTTPException(409, "No failed screening to retry")
     return {"status": "queued"}
 
 
 @app.get("/calendar/availability")
-def check_availability(start: AwareDatetime, user: Staff):
-    return {"busy": availability(start, start + timedelta(hours=1))}
+def calendar_availability(start: AwareDatetime, end: AwareDatetime, _user: Staff):
+    if end <= start:
+        raise HTTPException(422, "End must follow start")
+    return availability(start, end)
 
 
-class Change(BaseModel):
-    target: CandidateStatus
-    start: AwareDatetime | None = None
-    note: str = Field(default="", max_length=20000)
-    checklist: list[str] = Field(default_factory=list, max_length=50)
-
-
-@app.post("/runs/{run_id}/stage")
-def change_stage(run_id: int, change: Change, user: Staff):
-    target = change.target
-    with transaction() as cur:
-        cur.execute(
-            "SELECT stage,interview_at FROM agent_runs WHERE id=%s FOR UPDATE",
-            (run_id,),
+@app.post("/applications/{application_id}/stage")
+def change_stage(application_id: int, body: StageChange, conn: Connection, user: Staff):
+    application = applications.lock(conn, application_id)
+    if not application:
+        raise HTTPException(404, "Application not found")
+    current, target = CandidateStatus(application["status"]), body.target
+    if runs.pending_for(conn, application_id):
+        raise HTTPException(409, "Resolve the pending scheduling or offer action first")
+    reschedule = current == target == CandidateStatus.INTERVIEW_SCHEDULED
+    if not reschedule:
+        try:
+            validate_transition(current, target, hr_approved=True)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+    if target == CandidateStatus.SCREENED:
+        raise HTTPException(409, "Only the screening worker can complete screening")
+    if target == CandidateStatus.INTERVIEW_SCHEDULED:
+        start = body.scheduled_start
+        interviewer = (
+            users.by_id(conn, body.interviewer_id) if body.interviewer_id else None
         )
-        run = cur.fetchone()
-        if not run:
-            raise HTTPException(404, "Unknown run")
-        current = CandidateStatus(run["stage"])
-        cur.execute(
-            """SELECT 1 FROM recruitment_actions WHERE run_id=%s AND kind IN ('book','reschedule','offer')
-                       AND state IN ('pending','sending','uncertain')""",
-            (run_id,),
-        )
-        if cur.fetchone():
-            raise HTTPException(
-                409, "Resolve the outstanding delivery before changing the stage"
-            )
-        rescheduling = current == target == CandidateStatus.INTERVIEW_SCHEDULED
-        if not rescheduling:
-            try:
-                validate_transition(current, target, hr_approved=user["role"] == "hr")
-            except ValueError as exc:
-                raise HTTPException(409, str(exc))
-            except PermissionError as exc:
-                raise HTTPException(403, str(exc))
-        if target == CandidateStatus.SCREENED:
-            raise HTTPException(409, "Screening is performed by the worker")
+        if not start or start <= datetime.now(timezone.utc):
+            raise HTTPException(422, "A future interview time is required")
         if (
-            target in (CandidateStatus.FEEDBACK_RECEIVED, CandidateStatus.OFFER_SENT)
-            and not change.note.strip()
+            not interviewer
+            or not interviewer["is_active"]
+            or interviewer["role"] != "interviewer"
         ):
-            raise HTTPException(422, "Supply written feedback or offer terms")
-        if target == CandidateStatus.INTERVIEW_SCHEDULED:
-            if not change.start or change.start <= datetime.now(timezone.utc):
-                raise HTTPException(422, "Select a future interview time")
-            if rescheduling and run["interview_at"] == change.start:
-                return {"status": current}
-            # Serialize overlapping booking requests on the team's single calendar.
-            cur.execute("SELECT pg_advisory_xact_lock(781291)")
-            end = change.start + timedelta(hours=1)
-            cur.execute(
-                """SELECT 1 FROM recruitment_actions WHERE kind IN ('book','reschedule')
-                AND state IN ('pending','sending','uncertain')
-                AND (body->>'start')::timestamptz < %s
-                AND (body->>'start')::timestamptz + interval '1 hour' > %s LIMIT 1""",
-                (end, change.start),
-            )
-            if cur.fetchone():
-                raise HTTPException(409, "Another booking is pending for this slot")
-            busy = (
-                reschedule_conflict(run_id, change.start, end)
-                if rescheduling
-                else availability(change.start, end)
-            )
-            if busy:
-                raise HTTPException(409, "The calendar slot is busy")
-            kind = "reschedule" if rescheduling else "book"
-            body = {"start": change.start.isoformat()}
-        elif target == CandidateStatus.OFFER_SENT:
-            cur.execute(
-                "UPDATE agent_runs SET approved_by=%s, offer=%s WHERE id=%s",
-                (user["user_id"], change.note, run_id),
-            )
-            kind, body = "offer", {
-                "subject": "Offer of employment",
-                "text": change.note,
-            }
-        else:
-            if target == CandidateStatus.ONBOARDING and not all(
-                s.strip() for s in change.checklist
-            ):
-                raise HTTPException(422, "Each checklist item needs a name")
-            if target == CandidateStatus.ONBOARDING and not change.checklist:
-                raise HTTPException(422, "Provide the onboarding checklist")
-            if target == CandidateStatus.COMPLETE and not change.note.strip():
-                raise HTTPException(422, "Record how the checklist was verified")
-            cur.execute(
-                """UPDATE agent_runs SET stage=%s,
-                        feedback=CASE WHEN %s='feedback_received' THEN %s ELSE feedback END,
-                        checklist=CASE WHEN %s='onboarding' THEN %s ELSE checklist END,
-                        completion_note=CASE WHEN %s='complete' THEN %s ELSE completion_note END,
-                        approved_by=CASE WHEN %s='rejected' THEN %s ELSE approved_by END WHERE id=%s""",
-                (
-                    target.value,
-                    target.value,
-                    change.note,
-                    target.value,
-                    change.checklist,
-                    target.value,
-                    change.note,
-                    target.value,
-                    user["user_id"],
-                    run_id,
-                ),
-            )
-            if target != CandidateStatus.ONBOARDING:
-                return {"status": target}
-            kind, body = "onboarding", {
-                "subject": "Your onboarding checklist",
-                "text": "\n".join(change.checklist),
-            }
-        cur.execute(
-            "INSERT INTO recruitment_actions(run_id,kind,body) VALUES (%s,%s,%s)",
-            (run_id, kind, Json(body)),
+            raise HTTPException(422, "Choose an active interviewer")
+        end = start + timedelta(hours=1)
+        if interviews.reserve_calendar(conn, application_id, start, end):
+            raise HTTPException(409, "That calendar slot is reserved")
+        busy = (
+            reschedule_conflict(application_id, start, end)
+            if reschedule
+            else availability(start, end)
         )
-    return {"status": "queued" if kind != "onboarding" else "onboarding"}
-
-
-@app.get("/applications")
-def applications(user: User):
-    with transaction() as cur:
-        cur.execute(
-            """SELECT id,stage,interview_at,checklist FROM agent_runs
-                       WHERE candidate_user_id=%s ORDER BY id DESC""",
-            (user["user_id"],),
+        if busy:
+            raise HTTPException(409, "That calendar slot is busy")
+        action = "reschedule" if reschedule else "book"
+        queued = runs.enqueue(
+            conn,
+            application_id,
+            action,
+            f"{action}:{application_id}:{start.astimezone(timezone.utc).isoformat()}",
+            {
+                "start": start.isoformat(),
+                "interviewer_id": interviewer["id"],
+                "expected_status": current.value,
+            },
         )
-        return cur.fetchall()
-
-
-@app.post("/applications/claim")
-def claim(user: User, code: str = Form(min_length=32, max_length=100)):
-    with transaction() as cur:
-        cur.execute(
-            """UPDATE agent_runs SET candidate_user_id=%s, claim_hash=NULL
-                       WHERE claim_hash=%s AND lower(email)=lower(%s) RETURNING id""",
-            (user["user_id"], hashlib.sha256(code.encode()).hexdigest(), user["email"]),
+        if not queued:
+            raise HTTPException(409, "This calendar request was already recorded")
+        return {"status": "queued"}
+    if target == CandidateStatus.FEEDBACK_RECEIVED:
+        if not interviews.feedback(
+            conn,
+            application_id,
+            body.feedback_comments,
+            Jsonb(body.feedback_scores or {}),
+            body.recommendation,
+        ):
+            raise HTTPException(
+                409, "Feedback is already submitted or no interview exists"
+            )
+    if target == CandidateStatus.OFFER_SENT:
+        if not body.offer_text:
+            raise HTTPException(422, "Offer text is required")
+        applications.approve_offer(conn, application_id, user["id"])
+        runs.enqueue(
+            conn,
+            application_id,
+            "offer",
+            f"offer:{application_id}",
+            {
+                "subject": "Offer",
+                "text": body.offer_text,
+                "expected_status": current.value,
+            },
         )
-        if not cur.fetchone():
-            raise HTTPException(404, "Invalid invitation")
-    return {"status": "linked"}
+        return {"status": "queued"}
+    if target == CandidateStatus.ONBOARDING:
+        if not body.checklist or not all(item.strip() for item in body.checklist):
+            raise HTTPException(422, "An onboarding checklist is required")
+        for item in body.checklist:
+            onboarding.create(conn, application_id, item.strip(), body.due_date)
+    if target == CandidateStatus.COMPLETE and any(
+        task["status"] != "verified"
+        for task in onboarding.list_for(conn, application_id)
+    ):
+        raise HTTPException(409, "Verify all onboarding tasks first")
+    approver = user["id"] if target == CandidateStatus.REJECTED else None
+    applications.set_status(conn, application_id, target.value, approver)
+    runs.record_transition(conn, application_id, current.value, target.value)
+    return {"status": target}
 
 
-class Reconciliation(BaseModel):
-    delivered: bool
-    evidence: str = Field(min_length=8, max_length=1000)
-    provider_id: str | None = Field(default=None, max_length=500)
+def task_access(conn, application_id, user):
+    if user["role"] in {"admin", "hr"}:
+        return
+    if user["role"] != "candidate" or not applications.owned_by(
+        conn, application_id, user["id"]
+    ):
+        raise HTTPException(404, "Application not found")
+
+
+@app.get("/applications/{application_id}/onboarding")
+def tasks(application_id: int, conn: Connection, user: User):
+    task_access(conn, application_id, user)
+    return onboarding.list_for(conn, application_id)
+
+
+@app.post("/applications/{application_id}/onboarding/{task_id}")
+def advance_task(application_id: int, task_id: int, conn: Connection, user: User):
+    task_access(conn, application_id, user)
+    before, after = (
+        ("pending", "submitted")
+        if user["role"] == "candidate"
+        else ("submitted", "verified")
+    )
+    if not onboarding.update(conn, application_id, task_id, before, after):
+        raise HTTPException(409, "Task is not ready for this action")
+    return {"status": after}
 
 
 @app.post("/actions/{action_id}/reconcile")
-def reconcile(
-    action_id: int,
-    decision: Reconciliation,
-    user: Annotated[dict, Depends(require_role("hr"))],
+def reconcile(action_id: int, body: Reconciliation, conn: Connection, _user: Staff):
+    run = runs.lock(conn, action_id)
+    if not run or run["details"].get("delivery") != "uncertain":
+        raise HTTPException(409, "Action does not require reconciliation")
+    if body.delivered:
+        if not body.provider_id:
+            raise HTTPException(422, "Provider receipt is required")
+        record_delivery(conn, run, body.provider_id)
+        runs.update(conn, action_id, "success", "sent", reconciliation_note=body.note)
+    else:
+        runs.update(conn, action_id, "running", "queued", reconciliation_note=body.note)
+    return {"status": "reconciled"}
+
+
+@app.get("/interviewers")
+def list_interviewers(conn: Connection, _user: Staff):
+    return users.interviewers(conn)
+
+
+@app.get("/interviews/assigned")
+def assigned_interviews(conn: Connection, user: User):
+    if user["role"] != "interviewer":
+        raise HTTPException(403, "Interviewer access required")
+    return interviews.assigned(conn, user["id"])
+
+
+@app.post("/interviews/{application_id}/feedback")
+def interviewer_feedback(
+    application_id: int, body: InterviewFeedback, conn: Connection, user: User
 ):
-    """HR checks the remote mailbox/calendar after an ambiguous network outcome."""
-    with transaction() as cur:
-        cur.execute(
-            "SELECT * FROM recruitment_actions WHERE id=%s FOR UPDATE", (action_id,)
-        )
-        action = cur.fetchone()
-        if not action or action["state"] != "uncertain":
-            raise HTTPException(409, "Only uncertain deliveries can be reconciled")
-        if decision.delivered:
-            if not decision.provider_id or not decision.provider_id.strip():
-                raise HTTPException(
-                    422, "Enter the message or event ID from the provider"
-                )
-            record_delivery(cur, action, decision.provider_id)
-        else:
-            cur.execute(
-                "UPDATE recruitment_actions SET state='pending',claimed_at=NULL WHERE id=%s",
-                (action_id,),
-            )
-        cur.execute(
-            "UPDATE recruitment_actions SET reconciled_by=%s,reconciliation_note=%s WHERE id=%s",
-            (user["user_id"], decision.evidence, action_id),
-        )
-    return {"status": "sent" if decision.delivered else "pending"}
+    application = applications.lock(conn, application_id)
+    interview = interviews.get(conn, application_id)
+    if (
+        not application
+        or not interview
+        or user["role"] != "interviewer"
+        or interview["interviewer_id"] != user["id"]
+    ):
+        raise HTTPException(404, "Interview not found")
+    if application["status"] != "interviewed":
+        raise HTTPException(409, "HR must first mark the interview complete")
+    if not interviews.feedback(
+        conn, application_id, body.comments, Jsonb(body.scores), body.recommendation
+    ):
+        raise HTTPException(409, "Feedback already submitted")
+    applications.set_status(conn, application_id, "feedback_received")
+    runs.record_transition(conn, application_id, "interviewed", "feedback_received")
+    return {"status": "feedback_received"}
+
+
+@app.get("/applications/{application_id}/activity")
+def application_activity(application_id: int, conn: Connection, _user: Staff):
+    return runs.activity(conn, application_id)

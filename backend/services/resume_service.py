@@ -2,9 +2,8 @@ import re
 import os
 from typing import List, Dict, Any, Optional, Tuple
 import json
-import fitz           
+import pymupdf as fitz
 from docx import Document
-from backend.database import get_db_connection
 
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 PHONE_RE = re.compile(
@@ -378,53 +377,3 @@ def parse_resume(file_content: bytes, filename: str) -> Dict[str, Any]:
         "skills": ", ".join(skills),
         "education": "; ".join(education)
     }
-
-def save_resume_to_db(data: Dict, user_id: int, job_id: str = None):
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-
-            cur.execute("""
-                INSERT INTO resume_data (job_id, candidate_name, email, phone, 
-                                         skills, education, interview_status)
-                VALUES (%s, %s, %s, %s, %s, %s, 'NEW')
-                RETURNING id
-            """, (job_id or 'DIRECT', data['name'], data['email'], data['mobile'], 
-                  data['skills'], data.get('education', '')))
-
-            row = cur.fetchone()
-            file_id = row[0]
-
-        conn.commit()
-        return file_id
-    except Exception as e:
-        conn.rollback()
-        raise e
-    finally:
-        conn.close()
-
-def save_resumes_batch(data_list: List[Dict], user_id: int, job_id: str = None) -> List[int]:
-    conn = get_db_connection()
-    file_ids = []
-    try:
-        with conn.cursor() as cur:
-            for d in data_list:
-                 cur.execute("""
-                    INSERT INTO resume_data (job_id, candidate_name, email, phone,
-                                             skills, education, interview_status)
-                    VALUES (%s, %s, %s, %s, %s, %s, 'NEW')
-                    RETURNING id
-                """, (job_id or 'DIRECT', d['name'], d['email'], d['mobile'],
-                      d.get('skills', ''), d.get('education', '')))
-
-                 row = cur.fetchone()
-                 file_id = row[0]
-                 file_ids.append(file_id)
-
-        conn.commit()
-        return file_ids
-    except Exception as e:
-        conn.rollback()
-        raise e
-    finally:
-        conn.close()

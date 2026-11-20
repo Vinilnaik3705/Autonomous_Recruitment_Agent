@@ -23,7 +23,7 @@ with sync_playwright() as tool:
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.goto("http://127.0.0.1:3000")
     page.get_by_role("button", name="Create candidate account").click()
-    page.get_by_label("Name", exact=True).fill("Browser-" + suffix)
+    page.get_by_label("Full name", exact=True).fill("Browser-" + suffix)
     page.get_by_label("Email", exact=True).fill(email)
     page.get_by_label("Password", exact=True).fill(password)
     page.get_by_role("button", name="Register", exact=True).click()
@@ -54,7 +54,11 @@ with sync_playwright() as tool:
     page.get_by_label("Email", exact=True).fill(email)
     page.get_by_label("Password", exact=True).fill(password)
     page.get_by_role("button", name="Sign in", exact=True).click()
+    page.get_by_label("Job title").fill("Backend Engineer")
     page.get_by_label("Job description").fill("Python backend developer")
+    page.get_by_role("button", name="Create job", exact=True).click()
+    page.get_by_role("option", name="Backend Engineer").wait_for(state="attached")
+    page.get_by_label("Candidate name").fill("Synthetic Candidate")
     page.get_by_label("Candidate email").fill(email)
     data = BytesIO()
     doc = Document()
@@ -68,6 +72,6 @@ with sync_playwright() as tool:
         }
     )
     page.get_by_role("button", name="Queue screening").click()
-    page.get_by_role("heading", name="synthetic.docx", exact=False).wait_for()
+    page.get_by_role("heading", name="Synthetic Candidate · Backend Engineer", exact=True).wait_for()
     assert not errors, errors
     browser.close()

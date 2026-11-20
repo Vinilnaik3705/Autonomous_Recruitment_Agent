@@ -4,7 +4,7 @@ x-backend: &backend
   build: ./backend
   env_file: .env
   environment:
-    DATABASE_URL: postgresql://recruitment:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/recruitment
+    DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
     REDIS_URL: redis://redis:6379/0
     GOOGLE_TOKEN_FILE: /run/secrets/google-token.json
   volumes:
@@ -37,7 +37,7 @@ services:
     <<: *backend
     depends_on:
       postgres: {condition: service_healthy}
-    command: alembic -c backend/alembic.ini upgrade head
+    command: python -m backend.db.migrate
   api:
     <<: *backend
     ports: ["127.0.0.1:8000:8000"]

@@ -10,7 +10,6 @@
     "test": "node --test src/workspace/*.test.mjs"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.119.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

@@ -1,14 +1,13 @@
-"""Postgres owns pending work. Beat republishes IDs after broker outages."""
+"""Dispatch database-backed recruitment work through Celery and Redis."""
 
-from contextlib import closing, contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import logging
 
 from celery import Celery
-from psycopg2.extras import Json, RealDictCursor
 
 from backend.config import get_settings
-from backend.database import get_db_connection
-from backend.embeddings.provider import LocalMiniLM
+from backend.database import worker_conn
+from backend.db.queries import applications, interviews, resumes, runs
 from backend.orchestration.screening import build_screening_graph
 from backend.services import google_workspace
 from backend.services.screening_score import score_candidate
@@ -22,149 +21,137 @@ app.conf.update(
 )
 
 
-@contextmanager
-def transaction():
-    with closing(get_db_connection()) as conn, conn, conn.cursor(
-        cursor_factory=RealDictCursor
-    ) as cur:
-        yield cur
-
-
 @app.task(name="recruitment.dispatch")
 def dispatch():
-    with transaction() as cur:
-        cur.execute(
-            "SELECT id FROM agent_runs WHERE screening_state='queued' ORDER BY id LIMIT 100"
-        )
-        for row in cur.fetchall():
-            screen.delay(row["id"])
-        cur.execute(
-            "UPDATE recruitment_actions SET state='uncertain' WHERE state='sending' AND claimed_at < now()-interval '15 minutes'"
-        )
-        cur.execute(
-            "SELECT id FROM recruitment_actions WHERE state='pending' AND available_at<=now() ORDER BY id LIMIT 100"
-        )
-        for row in cur.fetchall():
-            deliver.delay(row["id"])
+    with worker_conn() as conn:
+        runs.expire_dispatches(conn)
+        pending = runs.due(conn)
+    for row in pending:
+        (screen if row["action"] == "screen" else deliver).delay(row["id"])
 
 
 @app.task(name="recruitment.screen")
 def screen(run_id):
-    with transaction() as cur:
-        cur.execute(
-            "SELECT * FROM agent_runs WHERE id=%s AND screening_state='queued' FOR UPDATE SKIP LOCKED",
-            (run_id,),
-        )
-        run = cur.fetchone()
-        if not run:
+    with worker_conn() as conn:
+        run = runs.lock(conn, run_id)
+        if (
+            not run
+            or run["action"] != "screen"
+            or run["details"]["delivery"] != "queued"
+        ):
             return
-        encoder = LocalMiniLM()
+        application_id = run["application_id"]
+        source = applications.screening_input(conn, application_id)
+        if not source:
+            return
         try:
-            data = build_screening_graph(embedder=encoder).invoke(
-                {"file_bytes": bytes(run["document"]), "filename": run["filename"]}
+            path = source["resume_path"]
+            data = build_screening_graph().invoke(
+                {"file_bytes": resumes.read(conn, path), "filename": path}
             )
-            fields = data["fields"]
-            vector = data["embedding"]
             score = score_candidate(
-                vector,
-                encoder.encode(run["job_description"]),
-                fields["skills"],
-                run["required_skills"],
+                data["embedding"],
+                source["job_embedding"].to_list(),
+                data["fields"]["skills"],
+                source["required_skills"],
             )
         except Exception:
-            cur.execute(
-                "UPDATE agent_runs SET screening_state='failed' WHERE id=%s", (run_id,)
-            )
-            raise_after_commit = True
+            runs.update(conn, run_id, "failed", "failed")
+            logging.getLogger(__name__).exception("Screening failed for run %s", run_id)
         else:
-            cur.execute(
-                """UPDATE agent_runs SET screening_state='done', stage='screened', document=NULL,
-                           embedding=%s::vector, result=%s WHERE id=%s""",
-                (
-                    str(vector),
-                    Json({"fields": fields, "score": score.model_dump()}),
-                    run_id,
-                ),
-            )
-            raise_after_commit = False
-    if raise_after_commit:
-        raise RuntimeError(
-            "Screening failed; review model configuration or document and retry"
-        )
+            applications.save_screening(conn, application_id, data, score)
+            runs.record_transition(conn, application_id, "applied", "screened")
+            runs.update(conn, run_id, "success", "done")
 
 
 @app.task(name="recruitment.deliver")
-def deliver(action_id):
-    with transaction() as cur:
-        cur.execute(
-            """UPDATE recruitment_actions SET state='sending', claimed_at=now()
-                       WHERE id=%s AND state='pending' AND available_at<=now() RETURNING *""",
-            (action_id,),
-        )
-        action = cur.fetchone()
-        if not action:
-            return
-        cur.execute(
-            "SELECT email, stage, interview_at FROM agent_runs WHERE id=%s",
-            (action["run_id"],),
-        )
-        run = cur.fetchone()
-    body = action["body"]
-    kind = action["kind"]
-    try:
-        if kind in ("book", "reschedule"):
-            provider_id = google_workspace.schedule(
-                action["run_id"], run["email"], body["start"], kind == "reschedule"
-            )
-        elif kind == "reminder" and (
-            run["stage"] != "interview_scheduled"
-            or run["interview_at"] != datetime.fromisoformat(body["start"])
+def deliver(run_id):
+    with worker_conn() as conn:
+        run = runs.lock(conn, run_id)
+        if (
+            not run
+            or run["action"] == "screen"
+            or run["details"]["delivery"] != "queued"
         ):
-            provider_id = None
+            return
+        application = applications.lock(conn, run["application_id"])
+        body = run["details"]
+        expected = body.get("expected_status")
+        if not application or (expected and application["status"] != expected):
+            runs.update(conn, run_id, "success", "cancelled")
+            return
+        if run["action"] == "reminder":
+            appointment = interviews.get(conn, run["application_id"])
+            if not appointment or appointment[
+                "scheduled_start"
+            ] != datetime.fromisoformat(body["start"]):
+                runs.update(conn, run_id, "success", "cancelled")
+                return
+        runs.update(
+            conn,
+            run_id,
+            "running",
+            "sending",
+            claimed_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    try:
+        if run["action"] in {"book", "reschedule"}:
+            receipt = google_workspace.schedule(
+                run["application_id"],
+                application["email"],
+                body["start"],
+                run["action"] == "reschedule",
+            )
         else:
-            provider_id = google_workspace.send_mail(
-                run["email"], body["subject"], body["text"]
+            receipt = google_workspace.send_mail(
+                application["email"], body["subject"], body["text"]
             )
+        if not receipt:
+            raise RuntimeError("Provider returned no receipt")
     except Exception:
-        with transaction() as cur:
-            cur.execute(
-                "UPDATE recruitment_actions SET state='uncertain' WHERE id=%s",
-                (action_id,),
-            )
+        with worker_conn() as conn:
+            runs.update(conn, run_id, "failed", "uncertain")
         raise
-    with transaction() as cur:
-        record_delivery(cur, action, provider_id)
+    with worker_conn() as conn:
+        record_delivery(conn, run, receipt)
 
 
-def record_delivery(cur, action, provider_id):
-    """Apply delivery and its resulting stage in the same transaction."""
-    action_id, kind, body = action["id"], action["kind"], action["body"]
-    cur.execute(
-        "UPDATE recruitment_actions SET state=%s, provider_id=%s WHERE id=%s",
-        ("sent" if provider_id else "cancelled", provider_id, action_id),
-    )
-    if kind in ("book", "reschedule"):
+def record_delivery(conn, run, receipt):
+    application_id = run["application_id"]
+    action, body = run["action"], run["details"]
+    if action in {"book", "reschedule"}:
         start = datetime.fromisoformat(body["start"])
-        cur.execute(
-            "UPDATE agent_runs SET stage='interview_scheduled', interview_at=%s WHERE id=%s",
-            (start, action["run_id"]),
+        interview = interviews.save(
+            conn,
+            application_id,
+            body["interviewer_id"],
+            start,
+            start + timedelta(hours=1),
+            receipt,
         )
-        reminder = {
-            "subject": "Interview reminder",
-            "text": f"Your interview begins at {start.isoformat()}.",
-            "start": body["start"],
-        }
-        cur.execute(
-            """INSERT INTO recruitment_actions(run_id,kind,body,available_at)
-                      SELECT %s,'reminder',%s,%s WHERE %s > now() ON CONFLICT DO NOTHING""",
-            (
-                action["run_id"],
-                Json(reminder),
-                start - timedelta(hours=1),
-                start - timedelta(hours=1),
-            ),
+        applications.set_status(conn, application_id, "interview_scheduled")
+        runs.record_transition(
+            conn, application_id, body["expected_status"], "interview_scheduled"
         )
-    elif kind == "offer":
-        cur.execute(
-            "UPDATE agent_runs SET stage='offer_sent' WHERE id=%s", (action["run_id"],)
-        )
+        due = start - timedelta(hours=1)
+        if due > datetime.now(timezone.utc):
+            runs.enqueue(
+                conn,
+                application_id,
+                "reminder",
+                f"remind:{interview['id']}:{run['id']}",
+                {
+                    "start": body["start"],
+                    "subject": "Interview reminder",
+                    "text": f"Your interview starts at {body['start']}.",
+                    "expected_status": "interview_scheduled",
+                },
+                due,
+            )
+    elif action == "offer":
+        applications.offer_sent(conn, application_id)
+        runs.record_transition(conn, application_id, "selected", "offer_sent")
+    elif action == "reminder":
+        interviews.mark_reminded(conn, application_id)
+    runs.update(conn, run["id"], "success", "sent", provider_id=receipt, text=None)

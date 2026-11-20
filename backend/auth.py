@@ -1,64 +1,43 @@
-"""
-Auth utility wrapper mapping old calls to the new Better Auth verification layer.
-"""
-from backend.security.dependencies import (
-    get_current_user,
-    require_role,
-    require_permission,
-    ROLE_PERMISSIONS,
-    JWT_SECRET,
-    ALGORITHM
-)
+import base64
+import hashlib
+import hmac
 import os
-import jwt
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional
 
-ACCESS_TOKEN_EXPIRE_HOURS = 24
+import jwt
 
-def create_access_token(
-    data: Dict,
-    user_id: int,
-    role: str,
-    expires_delta: Optional[timedelta] = None
-) -> str:
-    """Legacy token creator for compatibility."""
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
-    else:
-        expire = datetime.now(timezone.utc) + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
+from backend.config import get_settings
 
-    to_encode.update({
-        "sub": str(user_id),
-        "role": role,
-        "exp": expire,
-        "iat": datetime.now(timezone.utc)
-    })
-    return jwt.encode(to_encode, JWT_SECRET, algorithm=ALGORITHM)
 
-def verify_token(token: str) -> Dict:
-    """Legacy token verifier for compatibility."""
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
-        user_id = payload.get("sub") or payload.get("id") or payload.get("user_id")
-        role = payload.get("role") or "recruiter"
+def hash_password(password, salt=None):
+    salt = os.urandom(16) if salt is None else salt
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1)
+    return base64.b64encode(salt + digest).decode()
 
-        if user_id is None:
-            raise Exception("Missing subject claim")
 
-        return {
-            "user_id": int(user_id) if str(user_id).isdigit() else user_id,
-            "role": role,
-            "payload": payload
-        }
-    except Exception as e:
-        from fastapi import HTTPException, status
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {str(e)}"
-        )
+def verify_password(password, encoded):
+    salt = base64.b64decode(encoded)[:16]
+    return hmac.compare_digest(hash_password(password, salt), encoded)
 
-def get_role_permissions(role: str) -> list:
-    """Get all permissions for a role."""
-    return ROLE_PERMISSIONS.get(role, [])
+
+def issue_token(user_id):
+    now = datetime.now(timezone.utc)
+    secret = get_settings().jwt_secret
+    if len(secret.encode()) < 32:
+        raise RuntimeError("JWT_SECRET must be at least 32 bytes")
+    return jwt.encode(
+        {"sub": str(user_id), "iat": now, "exp": now + timedelta(hours=8)},
+        secret,
+        algorithm="HS256",
+    )
+
+
+def token_user_id(token):
+    return int(
+        jwt.decode(
+            token,
+            get_settings().jwt_secret,
+            algorithms=["HS256"],
+            options={"require": ["sub", "exp"]},
+        )["sub"]
+    )

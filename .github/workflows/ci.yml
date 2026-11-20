@@ -59,11 +59,9 @@ jobs:
         DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_recruitment_db
         REDIS_URL: redis://localhost:6379/0
         PIPELINE_INTEGRATION: '1'
-        PIPELINE_BROKER_TEST: '1'
-        INTERNAL_API_KEY: ci-only-worker-key
         JWT_SECRET: ci-only-test-secret-of-at-least-32-bytes
       run: |
-        alembic -c backend/alembic.ini upgrade head
+        python -m backend.db.migrate
         python -m pytest --cov=backend --cov-report=xml --cov-report=term
     
     - name: Upload coverage to Codecov
@@ -195,6 +193,7 @@ jobs:
       run: |
         cat > .env <<'ENV'
         POSTGRES_PASSWORD=compose-test-only
+        DATABASE_URL=postgresql://recruitment:compose-test-only@postgres:5432/recruitment
         JWT_SECRET=compose-test-only-with-at-least-32-bytes
         ENV
         docker compose up -d --no-build

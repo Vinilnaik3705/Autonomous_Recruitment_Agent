@@ -7,4 +7,4 @@ ENV PYTHONPATH=/app
 RUN useradd --create-home recruitment
 USER recruitment
 EXPOSE 8000
-CMD ["uvicorn","backend.pipeline_api:app","--host","0.0.0.0","--port","8000"]
+CMD ["sh","-c","python -m backend.db.migrate && exec uvicorn backend.pipeline_api:app --host 0.0.0.0 --port ${PORT:-8000}"]

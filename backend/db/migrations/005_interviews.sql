@@ -1,0 +1,23 @@
+CREATE TABLE interviews (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    application_id bigint NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    interviewer_id bigint NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    round_number integer NOT NULL CHECK (round_number > 0),
+    scheduled_start timestamptz NOT NULL,
+    scheduled_end timestamptz NOT NULL CHECK (scheduled_end > scheduled_start),
+    status text NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled','rescheduled','cancelled','completed','no_show')),
+    meeting_link text,
+    google_event_id text,
+    reschedule_count integer NOT NULL DEFAULT 0 CHECK (reschedule_count >= 0),
+    reminder_sent_at timestamptz,
+    feedback_token text UNIQUE,
+    feedback_requested_at timestamptz,
+    feedback_reminder_count integer NOT NULL DEFAULT 0 CHECK (feedback_reminder_count >= 0),
+    feedback_last_reminder_at timestamptz,
+    feedback_submitted_at timestamptz,
+    feedback_scores jsonb,
+    recommendation text CHECK (recommendation IN ('select','reject','hold')),
+    feedback_comments text,
+    feedback_summary text,
+    UNIQUE(application_id, round_number)
+);

@@ -11,6 +11,6 @@ const next = {
 };
 export function transitions(stage, role) {
   return (next[stage] || []).filter(
-    (target) => role === "hr" || !["offer_sent", "rejected"].includes(target),
+    (target) => ["hr", "admin"].includes(role) || !["offer_sent", "rejected"].includes(target),
   );
 }
